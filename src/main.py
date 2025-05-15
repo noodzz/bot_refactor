@@ -9,7 +9,6 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from src.config import load_config
 from src.utils.logging import setup_logging
 from src.data.database.manager import DatabaseManager
-from src.data.templates.default_templates import DEFAULT_TEMPLATES
 from src.core.services.project_service import ProjectService
 from src.core.services.task_service import TaskService
 from src.core.services.employee_service import EmployeeService
@@ -18,6 +17,9 @@ from src.core.services.export_service import ExportService
 from src.data.database.project_repo import ProjectRepository
 from src.data.database.task_repo import TaskRepository
 from src.data.database.employee_repo import EmployeeRepository
+from src.data.templates.default_templates import DEFAULT_TEMPLATES
+from src.core.reports.gantt_chart import GanttChart
+from src.core.reports.workload_chart import WorkloadChart
 from src.bot.handlers import register_all_handlers
 
 # Настройка логирования
@@ -59,10 +61,24 @@ async def main():
         config['JIRA_PROJECT']
     )
 
+    # Инициализируем генераторы отчетов
+    gantt_chart = GanttChart()
+    workload_chart = WorkloadChart()
+
     # Инициализируем бота
     bot = Bot(token=config['BOT_TOKEN'])
     storage = MemoryStorage()
     dp = Dispatcher(storage=storage)
+
+    # Добавляем зависимости в контекст бота
+    bot['db_manager'] = db_manager
+    bot['project_service'] = project_service
+    bot['task_service'] = task_service
+    bot['employee_service'] = employee_service
+    bot['schedule_service'] = schedule_service
+    bot['export_service'] = export_service
+    bot['gantt_chart'] = gantt_chart
+    bot['workload_chart'] = workload_chart
 
     # Регистрируем обработчики
     register_all_handlers(
