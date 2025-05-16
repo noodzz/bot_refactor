@@ -24,6 +24,19 @@ class DatabaseManager:
         if db_dir and not os.path.exists(db_dir):
             os.makedirs(db_dir)
 
+    def connect(self) -> None:
+        """Устанавливает соединение с базой данных"""
+        self.connection = sqlite3.connect(self.db_path)
+        self.connection.row_factory = sqlite3.Row
+        self.cursor = self.connection.cursor()
+
+    def close(self) -> None:
+        """Закрывает соединение с базой данных"""
+        if self.connection:
+            self.connection.close()
+            self.connection = None
+            self.cursor = None
+
     def init_db(self) -> None:
         """Инициализирует базу данных и создает таблицы, если их нет"""
         connection = self._get_connection()
@@ -114,63 +127,47 @@ class DatabaseManager:
         Returns:
             List[sqlite3.Row]: Результат выполнения запроса
         """
-        connection = None
-        cursor = None
+        result = []
+        self.connect()
 
         try:
-            connection = self._get_connection()
-            cursor = connection.cursor()
-
-            is_insert = query.strip().upper().startswith("INSERT")
-
-            # Удалим RETURNING id из запроса, если оно есть
-            if is_insert and "RETURNING id" in query:
-                query = query.replace("RETURNING id", "")
-                logger.debug("Удалено 'RETURNING id' из запроса")
-
             if params:
-                cursor.execute(query, params)
+                self.cursor.execute(query, params)
             else:
-                cursor.execute(query)
+                self.cursor.execute(query)
 
-            # Для INSERT получаем last_insert_rowid до коммита
-            last_id = None
-            if is_insert:
-                last_id = cursor.lastrowid
-                logger.debug(f"Получен last_insert_rowid: {last_id}")
+            self.connection.commit()
 
-            # Коммитим изменения
-            connection.commit()
-
-            # Пытаемся получить результаты запроса
             try:
-                result = cursor.fetchall()
-                logger.debug(f"Получены результаты запроса: {len(result)} строк")
+                result = self.cursor.fetchall()
             except sqlite3.Error:
-                # Нет результатов для возврата
-                result = []
-                logger.debug("Запрос не вернул результатов")
+                # Нет результатов
+                pass
 
-            # Для INSERT, если нет результатов, используем сохраненный last_id
-            if is_insert and not result and last_id:
-                result = [(last_id,)]
-                logger.debug(f"Создан фиктивный результат с last_id: {last_id}")
-
-            return result
         except Exception as e:
-            if connection:
-                try:
-                    connection.rollback()
-                except Exception as rollback_error:
-                    logger.error(f"Ошибка при откате транзакции: {rollback_error}")
-            logger.error(f"Ошибка SQL: {e} в запросе: {query}")
+            if self.connection:
+                self.connection.rollback()
+            logger.error(f"SQL Error: {e} in query: {query}")
             raise
         finally:
-            if connection:
-                try:
-                    connection.close()
-                except Exception as close_error:
-                    logger.error(f"Ошибка при закрытии соединения с БД: {close_error}")
+            self.close()
+
+        return result
+
+    def get_last_inserted_id(self) -> int:
+        """
+        Возвращает ID последней добавленной записи
+
+        Returns:
+            int: ID записи или 0, если произошла ошибка
+        """
+        self.connect()
+        try:
+            self.cursor.execute("SELECT last_insert_rowid()")
+            result = self.cursor.fetchone()
+            return result[0] if result else 0
+        finally:
+            self.close()
 
     def execute_transaction(self, queries_with_params: List[Tuple[str, Optional[Tuple]]]) -> List[List[sqlite3.Row]]:
         """
@@ -345,3 +342,36 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"Ошибка при обновлении пользователя: {e}")
             return False
+
+    def insert_and_get_id(self, query: str, params: Optional[Tuple] = None) -> int:
+        """
+        Выполняет операцию вставки и возвращает ID вставленной записи
+
+        Args:
+            query: SQL-запрос INSERT
+            params: Параметры запроса
+
+        Returns:
+            int: ID вставленной записи или 0, если произошла ошибка
+        """
+        self.connect()
+        try:
+            if params:
+                self.cursor.execute(query, params)
+            else:
+                self.cursor.execute(query)
+
+            # Получаем ID сразу после вставки, до коммита и закрытия соединения
+            row_id = self.cursor.lastrowid
+
+            # Только после получения ID выполняем коммит
+            self.connection.commit()
+
+            return row_id or 0
+        except Exception as e:
+            if self.connection:
+                self.connection.rollback()
+            logger.error(f"SQL Error in insert_and_get_id: {e} in query: {query}")
+            return 0
+        finally:
+            self.close()

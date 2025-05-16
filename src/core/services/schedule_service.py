@@ -9,7 +9,7 @@ from src.core.algorithms.network_model import NetworkModel
 from src.core.algorithms.resource_allocation import (
     check_employee_availability,
     find_suitable_employee,
-    find_suitable_employee_with_days_off
+    find_suitable_employee_with_days_off, find_available_date
 )
 from src.core.services.employee_service import EmployeeService
 from src.core.services.task_service import TaskService
@@ -88,7 +88,6 @@ class ScheduleService:
                             # Обновляем загрузку сотрудника
                             employee_workload[task.employee_id] = employee_workload.get(task.employee_id,
                                                                                         0) + task.duration
-
                             # Обновляем загрузку по дням
                             if task.employee_id not in employee_daily_load:
                                 employee_daily_load[task.employee_id] = {}
@@ -114,34 +113,48 @@ class ScheduleService:
                         logger.warning(f"Не найдены сотрудники с должностью '{task.position}' для задачи {task.name}")
                         continue
 
-                    # Выбираем сотрудника с учетом выходных дней
-                    employee_id = find_suitable_employee_with_days_off(
-                        task.position,
-                        dates['start'],
-                        task.duration,
-                        self.employee_service,
-                        employee_workload
-                    )
+                    # Проверяем, можно ли назначить какого-то сотрудника на текущие даты
+                    employee_assigned = False
+                    for employee in suitable_employees:
+                        if check_employee_availability(employee.id, dates['start'], task.duration,
+                                                       self.employee_service):
+                            # Назначаем сотрудника на задачу с текущими датами
+                            self.task_service.assign_employee(task_id, employee.id)
+                            employee_workload[employee.id] = employee_workload.get(employee.id, 0) + task.duration
+                            employee_assigned = True
+                            logger.info(f"Сотрудник {employee.name} назначен на задачу {task.name} (даты не менялись)")
+                            break
 
-                    if employee_id:
-                        # Назначаем сотрудника на задачу
-                        self.task_service.assign_employee(task_id, employee_id)
+                    # Если никого нельзя назначить на текущие даты, пробуем сдвинуть даты
+                    if not employee_assigned:
+                        logger.info(
+                            f"Никто не доступен для задачи {task.name} на даты {dates['start']} - {dates['end']}, пробуем сдвинуть")
 
-                        # Обновляем загрузку сотрудника
-                        if employee_id not in employee_daily_load:
-                            employee_daily_load[employee_id] = {}
+                        # Сортируем сотрудников по загрузке (выбираем наименее загруженных)
+                        sorted_employees = sorted(suitable_employees, key=lambda e: employee_workload.get(e.id, 0))
 
-                        start_date = datetime.datetime.strptime(dates['start'], '%Y-%m-%d')
-                        end_date = datetime.datetime.strptime(dates['end'], '%Y-%m-%d')
-                        current_date = start_date
+                        # Пробуем каждого сотрудника и ищем для него доступные даты
+                        for employee in sorted_employees:
+                            new_start, new_end = find_available_date(
+                                employee.id, dates['start'], task.duration, self.employee_service
+                            )
 
-                        while current_date <= end_date:
-                            date_str = current_date.strftime('%Y-%m-%d')
-                            if date_str not in employee_daily_load[employee_id]:
-                                employee_daily_load[employee_id][date_str] = 0
+                            if new_start and new_end:
+                                # Назначаем сотрудника и обновляем даты
+                                self.task_service.assign_employee(task_id, employee.id)
+                                self.task_service.update_task_dates({task_id: {'start': new_start, 'end': new_end}})
 
-                            employee_daily_load[employee_id][date_str] += 1
-                            current_date += datetime.timedelta(days=1)
+                                # Обновляем загрузку
+                                employee_workload[employee.id] = employee_workload.get(employee.id, 0) + task.duration
+
+                                logger.info(
+                                    f"Задача {task.name} смещена на {new_start} - {new_end} и назначена на {employee.name}")
+                                employee_assigned = True
+                                break
+
+                        if not employee_assigned:
+                            logger.warning(
+                                f"Не удалось найти доступные даты для задачи {task.name} ни для одного сотрудника")
 
                 except Exception as e:
                     logger.error(f"Ошибка при назначении сотрудника на задачу {task_id}: {str(e)}")

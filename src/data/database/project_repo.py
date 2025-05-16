@@ -30,23 +30,14 @@ class ProjectRepository:
         """
         logger = logging.getLogger(__name__)
         try:
-            # Выполняем вставку и получение ID в одной транзакции
-            queries = [
-                (
-                    "INSERT INTO projects (name, start_date, user_id) VALUES (?, ?, ?)",
-                    (name, start_date, user_id)
-                ),
-                (
-                    "SELECT last_insert_rowid()",
-                    None
-                )
-            ]
+            # Создаем проект
+            query = "INSERT INTO projects (name, start_date, user_id) VALUES (?, ?, ?)"
+            params = (name, start_date, user_id)
 
-            results = self.db.execute_transaction(queries)
+            # Используем новый метод для вставки и получения ID
+            project_id = self.db.insert_and_get_id(query, params)
 
-            # Второй результат - это результат SELECT last_insert_rowid()
-            if results and len(results) > 1 and results[1] and results[1][0]:
-                project_id = results[1][0][0]
+            if project_id:
                 logger.info(f"Создан проект '{name}' с ID {project_id}")
                 return project_id
 
@@ -54,7 +45,7 @@ class ProjectRepository:
             return 0
         except Exception as e:
             logger.error(f"Ошибка при создании проекта '{name}': {str(e)}")
-            raise ValueError(f"Не удалось создать проект: {str(e)}")
+            return 0
 
     def get_project(self, project_id: int) -> Optional[Project]:
         """

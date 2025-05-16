@@ -5,6 +5,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+
 def check_employee_availability(employee_id: int, start_date: str, duration: int, employee_manager) -> bool:
     """
     Проверяет доступность сотрудника на указанный период с учетом выходных дней
@@ -19,21 +20,37 @@ def check_employee_availability(employee_id: int, start_date: str, duration: int
         bool: True, если сотрудник доступен на все дни периода, False в противном случае
     """
     try:
+        # Получаем информацию о сотруднике
+        employee = employee_manager.get_employee(employee_id)
+        if not employee:
+            logger.warning(f"Сотрудник с ID {employee_id} не найден")
+            return False
+
+        # Выводим дни недели, которые сотрудник указал как выходные
+        logger.info(f"Сотрудник {employee.name} (ID: {employee_id}): выходные дни = {employee.days_off}")
+
         # Преобразуем дату начала в объект datetime
         current_date = datetime.datetime.strptime(start_date, '%Y-%m-%d')
 
         # Проверяем каждый день
+        unavailable_days = []
         for day in range(duration):
             date_str = current_date.strftime('%Y-%m-%d')
+            weekday = current_date.weekday() + 1  # +1 для формата 1-7 (пн-вс)
 
             # Проверяем доступность сотрудника на этот день
             if not employee_manager.is_available(employee_id, date_str):
                 # День недоступен (выходной)
-                logger.debug(f"Сотрудник {employee_id} недоступен на дату {date_str} (выходной день)")
-                return False
+                logger.debug(f"Сотрудник {employee_id} недоступен на дату {date_str} (день недели: {weekday})")
+                unavailable_days.append((date_str, weekday))
 
             # Переходим к следующему дню
             current_date += datetime.timedelta(days=1)
+
+        if unavailable_days:
+            logger.warning(
+                f"Сотрудник {employee.name} (ID: {employee_id}) недоступен в следующие дни: {unavailable_days}")
+            return False
 
         # Если все дни проверены и сотрудник доступен, возвращаем True
         return True
@@ -228,7 +245,9 @@ def calculate_dates_with_days_off(task: Dict[str, Any], start_date_str: str,
         logger.error(f"Ошибка при расчете дат с учетом выходных: {str(e)}")
         return None
 
-def find_available_date(employee_id: int, start_date: str, duration: int, employee_manager) -> Tuple[Optional[str], Optional[str]]:
+
+def find_available_date(employee_id: int, start_date: str, duration: int, employee_manager) -> Tuple[
+    Optional[str], Optional[str]]:
     """
     Находит ближайшую доступную дату для сотрудника с учетом выходных
 
@@ -242,36 +261,54 @@ def find_available_date(employee_id: int, start_date: str, duration: int, employ
         Tuple[Optional[str], Optional[str]]: (start_date, end_date) - новая дата начала и окончания или (None, None), если не найдена
     """
     # Максимальное количество дней для поиска
-    max_days = 30
+    max_days = 60  # Увеличиваем для большего диапазона поиска
 
     try:
+        # Получаем информацию о сотруднике
+        employee = employee_manager.get_employee(employee_id)
+        if not employee:
+            logger.warning(f"Сотрудник с ID {employee_id} не найден")
+            return None, None
+
+        logger.info(
+            f"Поиск доступных дат для сотрудника {employee.name} (ID: {employee_id}): выходные дни = {employee.days_off}")
+
         current_date = datetime.datetime.strptime(start_date, '%Y-%m-%d')
         end_date = current_date
 
-        # Ищем период без выходных дней достаточной длительности
-        for _ in range(max_days):
-            # Проверяем текущую дату как потенциальное начало
-            found_period = True
+        # Пробуем каждую дату как потенциальное начало периода
+        for attempt in range(max_days):
+            # Проверяем, не выходной ли день
+            if not employee_manager.is_available(employee_id, current_date.strftime('%Y-%m-%d')):
+                # Если текущий день - выходной, переходим к следующему
+                logger.debug(
+                    f"День {current_date.strftime('%Y-%m-%d')} - выходной для сотрудника {employee_id}, пробуем следующий")
+                current_date += datetime.timedelta(days=1)
+                continue
+
+            # Пробуем период с текущей даты
             test_date = current_date
-            working_days = 0
+            consecutive_working_days = 0
+            available_period = True
 
-            while working_days < duration:
-                date_str = test_date.strftime('%Y-%m-%d')
-
-                if not employee_manager.is_available(employee_id, date_str):
-                    # Если встретили выходной, сдвигаем текущую дату и пробуем снова
-                    found_period = False
+            while consecutive_working_days < duration:
+                if not employee_manager.is_available(employee_id, test_date.strftime('%Y-%m-%d')):
+                    # Встретили выходной день внутри периода
+                    available_period = False
+                    logger.debug(
+                        f"Внутри проверяемого периода с {current_date.strftime('%Y-%m-%d')} обнаружен выходной {test_date.strftime('%Y-%m-%d')}")
                     break
 
-                # Увеличиваем счетчик рабочих дней
-                working_days += 1
+                consecutive_working_days += 1
                 end_date = test_date
                 test_date += datetime.timedelta(days=1)
 
-            if found_period:
+            if available_period:
+                logger.info(
+                    f"Найден доступный период для сотрудника {employee_id}: {current_date.strftime('%Y-%m-%d')} - {end_date.strftime('%Y-%m-%d')}")
                 return current_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d')
 
-            # Сдвигаем текущую дату на один день вперед
+            # Сдвигаемся на один день и пробуем снова
             current_date += datetime.timedelta(days=1)
 
         logger.warning(f"Не удалось найти доступный период для сотрудника {employee_id} в течение {max_days} дней")

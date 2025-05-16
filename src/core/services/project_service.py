@@ -77,6 +77,7 @@ class ProjectService:
 
             task_id = self.task_repo.create_task(task)
             task_mapping[task_data["name"]] = task_id
+            logger.info(f"Создана задача '{task_data['name']}' с ID {task_id}")
 
             # Если это групповая задача, создаем подзадачи
             if is_group and "subtasks" in task_data:
@@ -97,27 +98,70 @@ class ProjectService:
                         f"для задачи '{task_data['name']}' (ID: {task_id})"
                     )
 
-        # Затем устанавливаем зависимости
-        for task_data in template["tasks"]:
-            if "predecessors" in task_data and task_data["predecessors"]:
-                task_id = task_mapping[task_data["name"]]
+            # Затем устанавливаем зависимости
+            for task_data in template["tasks"]:
+                if "predecessors" in task_data and task_data["predecessors"]:
+                    task_name = task_data["name"].strip()  # Удаляем лишние пробелы
 
-                # Получаем текущую задачу
-                task = self.task_repo.get_task(task_id)
-                if task:
-                    # Создаем список ID предшественников
-                    predecessors = []
-                    for predecessor_name in task_data["predecessors"]:
-                        if predecessor_name in task_mapping:
-                            predecessor_id = task_mapping[predecessor_name]
-                            predecessors.append(predecessor_id)
-                            # Добавляем зависимость в базу данных
-                            self.task_repo.add_dependency(task_id, predecessor_id)
+                    # Если точное имя не найдено, попробуем найти без учета регистра и пробелов
+                    if task_name not in task_mapping:
+                        normalized_name = task_name.lower().replace(" ", "")
+                        for k, v in task_mapping.items():
+                            if k.lower().replace(" ", "") == normalized_name:
+                                task_name = k
+                                logger.info(f"Найдено соответствие для '{task_data['name']}' -> '{task_name}'")
+                                break
 
-                    # Обновляем задачу в базе с информацией о предшественниках
-                    task.predecessors = predecessors
-                    self.task_repo.update_task(task)
+                    if task_name not in task_mapping:
+                        logger.warning(f"Задача '{task_data['name']}' не найдена в маппинге, пропускаем зависимости")
+                        continue
 
+                    task_id = task_mapping[task_name]
+
+                    # Логируем для отладки
+                    logger.info(f"Обрабатываем зависимости для задачи '{task_name}' (ID: {task_id})")
+
+                    # Получаем текущую задачу
+                    task = self.task_repo.get_task(task_id)
+                    if task:
+                        # Создаем список ID предшественников
+                        predecessors = []
+                        for predecessor_name in task_data["predecessors"]:
+                            predecessor_name = predecessor_name.strip()  # Удаляем лишние пробелы
+
+                            # Если точное имя не найдено, попробуем найти без учета регистра и пробелов
+                            if predecessor_name not in task_mapping:
+                                normalized_name = predecessor_name.lower().replace(" ", "")
+                                for k, v in task_mapping.items():
+                                    if k.lower().replace(" ", "") == normalized_name:
+                                        predecessor_name = k
+                                        logger.info(
+                                            f"Найдено соответствие для предшественника '{predecessor_name}' -> '{k}'")
+                                        break
+
+                            if predecessor_name in task_mapping:
+                                predecessor_id = task_mapping[predecessor_name]
+                                predecessors.append(predecessor_id)
+                                # Добавляем зависимость в базу данных
+                                result = self.task_repo.add_dependency(task_id, predecessor_id)
+                                logger.info(
+                                    f"Добавлена зависимость: {task_id} ({task_name}) зависит от {predecessor_id} ({predecessor_name}), результат: {result}")
+                            else:
+                                logger.warning(f"Задача-предшественник '{predecessor_name}' не найдена")
+
+                        # Обновляем задачу в базе с информацией о предшественниках
+                        task.predecessors = predecessors
+                        result = self.task_repo.update_task(task)
+                        logger.info(
+                            f"Обновлена задача {task_id} с предшественниками {predecessors}, результат: {result}")
+
+        logger.info("Запускаем отладку зависимостей")
+        self.task_repo.debug_dependencies(project_id)
+
+        logger.info("===== Task Mapping =====")
+        for task_name, task_id in task_mapping.items():
+            logger.info(f"'{task_name}' -> {task_id}")
+        logger.info("=======================")
         return project_id
 
     def create_from_csv(self, name: str, start_date: str, csv_data: List[Dict[str, Any]],

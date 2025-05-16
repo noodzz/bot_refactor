@@ -292,7 +292,11 @@ class TaskService:
                     # Проверяем, существует ли задача
                     task = self.task_repo.get_task(task_id)
                     if task:
-                        self.task_repo.update_task_dates(task_id, dates['start'], dates['end'])
+                        # Логируем для отладки
+                        logger.info(f"Обновляем даты для задачи {task_id}: {dates['start']} - {dates['end']}")
+                        result = self.task_repo.update_task_dates(task_id, dates['start'], dates['end'])
+                        if not result:
+                            logger.error(f"Не удалось обновить даты для задачи {task_id}")
                 except Exception as e:
                     logger.error(f"Ошибка при обновлении дат задачи {task_id}: {str(e)}")
 

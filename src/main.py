@@ -7,6 +7,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
 
 from src.config import load_config
+from src.data.templates.default_employees import DEFAULT_EMPLOYEES
 from src.utils.auth_utils import setup_auth_functions
 from src.utils.context import init_services
 from src.utils.logging import setup_logging
@@ -130,7 +131,7 @@ async def main():
     # Инициализируем сервисы
     project_service = ProjectService(project_repo, task_repo, DEFAULT_TEMPLATES)
     task_service = TaskService(task_repo)
-    employee_service = EmployeeService(employee_repo, task_repo)
+    employee_service = EmployeeService(employee_repo, task_repo, DEFAULT_EMPLOYEES)
     schedule_service = ScheduleService(task_service, employee_service)
     export_service = ExportService(
         config.get('JIRA_URL', ''),

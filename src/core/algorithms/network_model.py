@@ -1,4 +1,5 @@
 import datetime
+import json
 from collections import defaultdict, deque
 from typing import Dict, List, Tuple, Any, Optional, Set
 import logging
@@ -221,39 +222,36 @@ class NetworkModel:
     def _get_task_dependencies(self, task_id: int) -> List[int]:
         """
         Возвращает список идентификаторов задач, от которых зависит указанная задача
-
-        Args:
-            task_id (int): Идентификатор задачи
-
-        Returns:
-            list: Список идентификаторов задач-предшественников
         """
         dependencies = []
 
-        # Создаем локальную копию списка задач для безопасной итерации
-        tasks_copy = list(self.tasks)
+        # Проверяем сначала в таблице dependencies
+        for task in self.tasks:
+            if task.get('id') == task_id and 'predecessors' in task:
+                # Пытаемся получить предшественников
+                task_predecessors = task.get('predecessors')
 
-        # Ищем задачу по ID
-        task = None
-        for t in tasks_copy:
-            if 'id' in t and t['id'] == task_id:
-                task = t
-                break
+                logger.info(
+                    f"Задача {task_id}: предшественники из БД = {task_predecessors}, тип: {type(task_predecessors)}")
 
-        if task:
-            # Проверяем, есть ли у задачи предшественники
-            if 'predecessors' in task and task['predecessors']:
-                # Дополнительно проверяем тип данных - должен быть список
-                if isinstance(task['predecessors'], list):
-                    dependencies = task['predecessors']
-                elif isinstance(task['predecessors'], str):
-                    # Пытаемся разобрать JSON или разделить строку по запятым
+                # Преобразуем предшественников в список
+                if isinstance(task_predecessors, list):
+                    dependencies = task_predecessors
+                elif isinstance(task_predecessors, str):
                     try:
-                        import json
-                        dependencies = json.loads(task['predecessors'])
-                    except:
-                        # Если не получается разобрать JSON, пробуем разделить по запятым
-                        dependencies = [id.strip() for id in task['predecessors'].split(',')]
+                        # Пытаемся преобразовать JSON-строку в список
+                        dependencies = json.loads(task_predecessors)
+                    except json.JSONDecodeError:
+                        logger.error(
+                            f"Ошибка при разборе JSON предшественников для задачи {task_id}: {task_predecessors}")
+                        dependencies = []
+
+                # Если это не список, создаем пустой список
+                if not isinstance(dependencies, list):
+                    dependencies = []
+
+                logger.info(f"Задача {task_id}: итоговые предшественники = {dependencies}")
+                break
 
         return dependencies
 
@@ -450,150 +448,137 @@ class NetworkModel:
         Returns:
             dict: Словарь с датами начала и окончания для каждой задачи
         """
+        # Преобразуем дату начала проекта
         start_date = datetime.datetime.strptime(project_start_date, '%Y-%m-%d')
+        logger.info(f"Дата начала проекта: {start_date.strftime('%Y-%m-%d')}")
 
         # Словарь с датами для задач
         task_dates = {}
 
-        # Проверяем, что у нас есть хотя бы один узел (кроме источника и стока)
-        if len(early_times) <= 2:
-            return task_dates
-
-        # Получаем список всех задач с их именами и ID
-        task_list = []
+        # Получаем все задачи
+        tasks = {}
         for task in self.tasks:
             if 'id' in task:
-                task_list.append(task)
+                tasks[task['id']] = task
 
-        # Строим словарь зависимостей
-        task_dependencies = {}
-        for task in task_list:
-            task_id = task['id']
-            predecessors = []
+        logger.info(f"Найдено {len(tasks)} задач")
 
-            # Проверяем, есть ли у задачи предшественники
-            if 'predecessors' in task and task['predecessors']:
-                predecessors = task['predecessors']
+        # Построим граф зависимостей (предшественники)
+        dependencies = {}
+        for task_id, task in tasks.items():
+            predecessors = self._get_task_dependencies(task_id)
+            dependencies[task_id] = predecessors
+            logger.info(f"Задача {task_id} ({task.get('name', '?')}): предшественники = {predecessors}")
 
-            task_dependencies[task_id] = predecessors
+        # Вычисляем даты начала и окончания для каждой задачи
+        # Начнем с задач без предшественников
+        processed = set()
+        task_end_dates = {}  # ID задачи -> дата окончания
 
-        # Вспомогательная функция для проверки, все ли предшественники задачи имеют даты
-        def are_all_predecessors_scheduled(task_id):
-            predecessors = task_dependencies.get(task_id, [])
-            return all(pred_id in task_dates for pred_id in predecessors)
+        # Повторяем, пока не обработаем все задачи
+        remaining = set(tasks.keys())
 
-        # Вспомогательная функция для получения самой поздней даты окончания предшественников
-        def get_latest_predecessor_end_date(task_id):
-            predecessors = task_dependencies.get(task_id, [])
-            if not predecessors:
-                return start_date
+        # Пока есть необработанные задачи
+        while remaining:
+            # Найдем задачи, все предшественники которых уже обработаны
+            ready_tasks = []
+            for task_id in remaining:
+                # Проверяем, все ли предшественники обработаны
+                all_predecessors_done = True
+                for pred_id in dependencies.get(task_id, []):
+                    if pred_id not in processed:
+                        all_predecessors_done = False
+                        break
 
-            end_dates = []
-            for pred_id in predecessors:
-                if pred_id in task_dates:
-                    end_date = datetime.datetime.strptime(task_dates[pred_id]['end'], '%Y-%m-%d')
-                    end_dates.append(end_date)
+                if all_predecessors_done:
+                    ready_tasks.append(task_id)
 
-            if end_dates:
-                return max(end_dates) + datetime.timedelta(days=1)  # Добавляем 1 день для перехода
-            else:
-                return start_date
+            # Если нет готовых задач, но остались необработанные,
+            # значит у нас есть циклическая зависимость
+            if not ready_tasks and remaining:
+                logger.warning("Обнаружена циклическая зависимость! Обрабатываем все оставшиеся задачи.")
+                ready_tasks = list(remaining)
 
-        # Определяем задачи без предшественников
-        tasks_without_predecessors = [task['id'] for task in task_list
-                                      if not task_dependencies.get(task['id'], [])]
+            # Обрабатываем готовые задачи
+            for task_id in ready_tasks:
+                task = tasks[task_id]
 
-        # Сначала планируем задачи без предшественников, начиная с даты начала проекта
-        for task_id in tasks_without_predecessors:
-            # Находим задачу
-            task = None
-            for t in task_list:
-                if t['id'] == task_id:
-                    task = t
-                    break
+                # Определяем дату начала задачи
+                task_start = start_date  # По умолчанию - дата начала проекта
 
-            if task:
-                # Дата начала - дата начала проекта
-                task_start = start_date
+                # Если есть предшественники, дата начала - день после окончания самого позднего предшественника
+                for pred_id in dependencies.get(task_id, []):
+                    if pred_id in task_end_dates:
+                        pred_end = task_end_dates[pred_id]
+                        next_day = pred_end + datetime.timedelta(days=1)
+                        if next_day > task_start:
+                            task_start = next_day
 
-                # Дата окончания = дата начала + длительность - 1
-                task_end = task_start + datetime.timedelta(days=task['duration'] - 1)
+                # Определяем дату окончания задачи
+                duration = task.get('duration', 1)
+                task_end = task_start + datetime.timedelta(days=duration - 1)  # -1, так как включаем последний день
 
-                # Добавляем даты в словарь
+                # Сохраняем даты
                 task_dates[task_id] = {
                     'start': task_start.strftime('%Y-%m-%d'),
                     'end': task_end.strftime('%Y-%m-%d')
                 }
 
-        # Затем планируем остальные задачи в порядке зависимостей
-        while len(task_dates) < len(task_list):
-            # Флаг, показывающий, планировали ли мы какую-то задачу на этой итерации
-            scheduled_task = False
+                # Сохраняем дату окончания для будущих зависимых задач
+                task_end_dates[task_id] = task_end
 
-            for task in task_list:
-                task_id = task['id']
+                # Помечаем задачу как обработанную
+                processed.add(task_id)
+                remaining.remove(task_id)
 
-                # Пропускаем уже запланированные задачи
-                if task_id in task_dates:
-                    continue
-
-                # Проверяем, все ли предшественники задачи уже запланированы
-                if are_all_predecessors_scheduled(task_id):
-                    # Определяем дату начала задачи как самую позднюю дату окончания среди предшественников
-                    task_start = get_latest_predecessor_end_date(task_id)
-
-                    # Дата окончания = дата начала + длительность - 1
-                    task_end = task_start + datetime.timedelta(days=task['duration'] - 1)
-
-                    # Добавляем даты в словарь
-                    task_dates[task_id] = {
-                        'start': task_start.strftime('%Y-%m-%d'),
-                        'end': task_end.strftime('%Y-%m-%d')
-                    }
-
-                    scheduled_task = True
-
-            # Если ни одна задача не была запланирована на этой итерации,
-            # и мы ещё не запланировали все задачи, значит, есть циклическая зависимость
-            if not scheduled_task and len(task_dates) < len(task_list):
-                logger.warning("Обнаружена циклическая зависимость или некоторые задачи не могут быть запланированы.")
-
-                # Планируем оставшиеся задачи на основе ранних сроков
-                for task in task_list:
-                    task_id = task['id']
-
-                    if task_id not in task_dates:
-                        # Находим узел в графе
-                        node = None
-                        for n, tid in self.reverse_mapping.items():
-                            if tid == task_id:
-                                node = n
-                                break
-
-                        if node is not None and node < len(early_times):
-                            # Определяем дату начала на основе ранних сроков
-                            task_start = start_date + datetime.timedelta(days=early_times[node])
-
-                            # Дата окончания = дата начала + длительность - 1
-                            task_end = task_start + datetime.timedelta(days=task['duration'] - 1)
-
-                            # Добавляем даты в словарь
-                            task_dates[task_id] = {
-                                'start': task_start.strftime('%Y-%m-%d'),
-                                'end': task_end.strftime('%Y-%m-%d')
-                            }
-
-                # Выходим из цикла, так как мы обработали все оставшиеся задачи
-                break
-
-        # Для задач, которые всё ещё не запланированы (например, из-за ошибок в данных),
-        # планируем их на дату начала проекта
-        for task in task_list:
-            task_id = task['id']
-            if task_id not in task_dates:
-                task_dates[task_id] = {
-                    'start': start_date.strftime('%Y-%m-%d'),
-                    'end': (start_date + datetime.timedelta(days=task['duration'] - 1)).strftime('%Y-%m-%d')
-                }
+                logger.info(
+                    f"Задача {task_id} ({task.get('name', '?')}): {task_start.strftime('%Y-%m-%d')} - {task_end.strftime('%Y-%m-%d')}")
 
         return task_dates
+
+    def _topological_sort(self, dependencies: Dict[int, List[int]]) -> List[int]:
+        """
+        Выполняет топологическую сортировку графа зависимостей
+
+        Args:
+            dependencies: Словарь зависимостей, где ключ - задача, значение - список предшественников
+
+        Returns:
+            List[int]: Отсортированный список задач
+        """
+        # Создаем обратный граф: для каждой задачи список задач, зависящих от неё
+        reversed_deps = {}
+        all_tasks = set()
+
+        for task_id, predecessors in dependencies.items():
+            all_tasks.add(task_id)
+            for pred in predecessors:
+                all_tasks.add(pred)
+                if pred not in reversed_deps:
+                    reversed_deps[pred] = []
+                reversed_deps[pred].append(task_id)
+
+        # Инициализация
+        visited = set()
+        sorted_tasks = []
+
+        # Рекурсивная функция для DFS
+        def dfs(task_id):
+            if task_id in visited:
+                return
+            visited.add(task_id)
+
+            # Посещаем все зависимые задачи
+            for dependent in reversed_deps.get(task_id, []):
+                dfs(dependent)
+
+            # После посещения всех зависимых, добавляем текущую задачу
+            sorted_tasks.append(task_id)
+
+        # Запускаем DFS с каждой задачи, которая не имеет предшественников
+        for task_id in all_tasks:
+            if not dependencies.get(task_id, []):
+                dfs(task_id)
+
+        # Возвращаем задачи в порядке их выполнения
+        return sorted_tasks
