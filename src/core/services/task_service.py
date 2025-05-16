@@ -311,3 +311,233 @@ class TaskService:
             List[Task]: Список задач
         """
         return self.task_repo.get_tasks_by_project(project_id, include_subtasks=True)
+
+    # В файле src/core/services/task_service.py
+    # Добавляем новый метод для исправления нарушений зависимостей непосредственно в БД
+
+    def fix_dependency_violations(self, project_id: int) -> Dict[str, Any]:
+        """
+        Проверяет и исправляет нарушения зависимостей между задачами проекта
+
+        Args:
+            project_id: ID проекта
+
+        Returns:
+            Dict[str, Any]: Информация о выполненных исправлениях
+        """
+        logger.info(f"Исправление нарушений зависимостей для проекта {project_id}")
+
+        # Получаем все задачи проекта
+        tasks = self.get_all_tasks_by_project(project_id)
+
+        # Создаем словарь задач для быстрого доступа
+        task_by_id = {task.id: task for task in tasks}
+
+        # Создаем словарь зависимостей
+        dependencies = {}
+
+        # Готовим список найденных нарушений и исправлений
+        violations = []
+        fixes = []
+
+        # Получаем зависимости для каждой задачи
+        for task in tasks:
+            if not task.predecessors:
+                continue
+
+            # Преобразуем предшественников в список
+            predecessors = []
+            if isinstance(task.predecessors, list):
+                predecessors = task.predecessors
+            elif isinstance(task.predecessors, str) and task.predecessors.strip():
+                try:
+                    import json
+                    predecessors = json.loads(task.predecessors)
+                except Exception as e:
+                    logger.warning(f"Не удалось разобрать предшественников для задачи {task.id}: {e}")
+                    predecessors = []
+
+            if predecessors:
+                dependencies[task.id] = predecessors
+
+        # Проверяем и исправляем нарушения зависимостей
+        import datetime
+
+        # Сначала находим все нарушения
+        for task_id, predecessors in dependencies.items():
+            task = task_by_id.get(task_id)
+            if not task or not task.start_date:
+                continue
+
+            task_name = task.name
+            task_start = datetime.datetime.strptime(task.start_date, '%Y-%m-%d')
+
+            for pred_id in predecessors:
+                pred = task_by_id.get(pred_id)
+                if not pred or not pred.end_date:
+                    continue
+
+                pred_name = pred.name
+                pred_end = datetime.datetime.strptime(pred.end_date, '%Y-%m-%d')
+
+                # Проверяем нарушение: задача начинается раньше или в тот же день,
+                # когда заканчивается предшественник
+                if task_start <= pred_end:
+                    violation = {
+                        'task_id': task_id,
+                        'task_name': task_name,
+                        'task_start': task.start_date,
+                        'task_end': task.end_date,
+                        'pred_id': pred_id,
+                        'pred_name': pred_name,
+                        'pred_end': pred.end_date
+                    }
+                    violations.append(violation)
+
+        # Если нарушений нет, возвращаем результат
+        if not violations:
+            return {
+                'fixed': False,
+                'message': 'Нарушений зависимостей не обнаружено',
+                'violations': [],
+                'fixes': []
+            }
+
+        # Исправляем нарушения
+        for violation in violations:
+            task_id = violation['task_id']
+            task = task_by_id.get(task_id)
+            pred_end = datetime.datetime.strptime(violation['pred_end'], '%Y-%m-%d')
+
+            # Новая дата начала - день после окончания предшественника
+            new_start_date = pred_end + datetime.timedelta(days=1)
+
+            # Пересчитываем дату окончания с учетом длительности
+            task_duration = task.duration - 1  # -1 т.к. считаем включительно
+            new_end_date = new_start_date + datetime.timedelta(days=task_duration)
+
+            # Сохраняем старые даты для логирования
+            old_start = task.start_date
+            old_end = task.end_date
+
+            # Обновляем даты в базе данных
+            self.update_task_dates({
+                task_id: {
+                    'start': new_start_date.strftime('%Y-%m-%d'),
+                    'end': new_end_date.strftime('%Y-%m-%d')
+                }
+            })
+
+            # Обновляем даты в нашем словаре задач для последующих проверок
+            task.start_date = new_start_date.strftime('%Y-%m-%d')
+            task.end_date = new_end_date.strftime('%Y-%m-%d')
+
+            fix = {
+                'task_id': task_id,
+                'task_name': task.name,
+                'old_start': old_start,
+                'old_end': old_end,
+                'new_start': task.start_date,
+                'new_end': task.end_date,
+                'pred_id': violation['pred_id'],
+                'pred_name': violation['pred_name']
+            }
+            fixes.append(fix)
+
+            logger.info(
+                f"Исправлено нарушение: задача {task.name} (ID {task_id}) перенесена "
+                f"с {old_start} - {old_end} на {task.start_date} - {task.end_date} "
+                f"из-за зависимости от {violation['pred_name']} (ID {violation['pred_id']})"
+            )
+
+            # После изменения дат текущей задачи, нужно проверить задачи, зависящие от нее
+            self._fix_dependent_tasks(task_id, task_by_id, dependencies, fixes)
+
+        return {
+            'fixed': True,
+            'message': f'Исправлено {len(fixes)} нарушений зависимостей',
+            'violations': violations,
+            'fixes': fixes
+        }
+
+    def _fix_dependent_tasks(self, task_id: int, task_by_id: Dict[int, Any],
+                             dependencies: Dict[int, List[int]], fixes: List[Dict[str, Any]]):
+        """
+        Рекурсивно исправляет даты задач, зависящих от указанной
+
+        Args:
+            task_id: ID задачи, даты которой были изменены
+            task_by_id: Словарь задач по ID
+            dependencies: Словарь зависимостей
+            fixes: Список выполненных исправлений
+        """
+        import datetime
+
+        # Находим все задачи, зависящие от данной
+        dependent_tasks = []
+        for dep_id, preds in dependencies.items():
+            if task_id in preds:
+                dependent_tasks.append(dep_id)
+
+        # Текущая задача после обновления
+        task = task_by_id.get(task_id)
+        if not task or not task.end_date:
+            return
+
+        task_end = datetime.datetime.strptime(task.end_date, '%Y-%m-%d')
+
+        # Исправляем даты зависимых задач
+        for dep_id in dependent_tasks:
+            dep_task = task_by_id.get(dep_id)
+            if not dep_task or not dep_task.start_date:
+                continue
+
+            dep_start = datetime.datetime.strptime(dep_task.start_date, '%Y-%m-%d')
+
+            # Если начало зависимой задачи раньше или равно окончанию текущей
+            if dep_start <= task_end:
+                # Новое начало - день после окончания текущей задачи
+                new_start = task_end + datetime.timedelta(days=1)
+
+                # Длительность зависимой задачи
+                dep_duration = dep_task.duration - 1  # -1 т.к. считаем включительно
+
+                # Новое окончание
+                new_end = new_start + datetime.timedelta(days=dep_duration)
+
+                # Сохраняем старые даты для логирования
+                old_start = dep_task.start_date
+                old_end = dep_task.end_date
+
+                # Обновляем даты в базе данных
+                self.update_task_dates({
+                    dep_id: {
+                        'start': new_start.strftime('%Y-%m-%d'),
+                        'end': new_end.strftime('%Y-%m-%d')
+                    }
+                })
+
+                # Обновляем даты в нашем словаре задач для последующих проверок
+                dep_task.start_date = new_start.strftime('%Y-%m-%d')
+                dep_task.end_date = new_end.strftime('%Y-%m-%d')
+
+                fix = {
+                    'task_id': dep_id,
+                    'task_name': dep_task.name,
+                    'old_start': old_start,
+                    'old_end': old_end,
+                    'new_start': dep_task.start_date,
+                    'new_end': dep_task.end_date,
+                    'pred_id': task_id,
+                    'pred_name': task.name
+                }
+                fixes.append(fix)
+
+                logger.info(
+                    f"Каскадное исправление: задача {dep_task.name} (ID {dep_id}) перенесена "
+                    f"с {old_start} - {old_end} на {dep_task.start_date} - {dep_task.end_date} "
+                    f"из-за изменения дат задачи {task.name} (ID {task_id})"
+                )
+
+                # Рекурсивно проверяем задачи, зависящие от этой
+                self._fix_dependent_tasks(dep_id, task_by_id, dependencies, fixes)

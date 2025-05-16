@@ -475,8 +475,17 @@ class NetworkModel:
         processed = set()
         task_end_dates = {}  # ID задачи -> дата окончания
 
+        # Проходим по task_dates - уже имеющиеся даты имеют приоритет
+        for task_id, date_data in task_dates.items():
+            if 'start' in date_data and 'end' in date_data:
+                start_dt = datetime.datetime.strptime(date_data['start'], '%Y-%m-%d')
+                end_dt = datetime.datetime.strptime(date_data['end'], '%Y-%m-%d')
+                task_end_dates[task_id] = end_dt
+                processed.add(task_id)
+                logger.info(f"Задача {task_id}: использую заданные даты {date_data['start']} - {date_data['end']}")
+
         # Повторяем, пока не обработаем все задачи
-        remaining = set(tasks.keys())
+        remaining = set(tasks.keys()) - processed
 
         # Пока есть необработанные задачи
         while remaining:

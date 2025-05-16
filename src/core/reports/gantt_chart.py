@@ -1,6 +1,8 @@
+import datetime
+import logging
+
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
-from datetime import datetime, timedelta
 import numpy as np
 import os
 import tempfile
@@ -30,21 +32,40 @@ class GanttChart:
         Returns:
             str: Путь к созданному файлу диаграммы
         """
+        logger = logging.getLogger(__name__)
         # Фильтруем только основные задачи (без подзадач)
         main_tasks = [task for task in tasks if not task.get('parent_id')]
+        task_list = []
+        logger.info(f"Получено {len(task_dates)} записей с датами для диаграммы Ганта")
 
         # Преобразуем даты в объекты datetime и создаем список задач
-        task_list = []
         for task in main_tasks:
-            if task['id'] in task_dates:
-                start_date = datetime.strptime(task_dates[task['id']]['start'], '%Y-%m-%d')
-                end_date = datetime.strptime(task_dates[task['id']]['end'], '%Y-%m-%d')
-                task_list.append((task, start_date, end_date))
+            if 'id' not in task:
+                continue
+
+            task_id = task['id']
+
+            if task_id in task_dates and 'start' in task_dates[task_id] and 'end' in task_dates[task_id]:
+                # Используем даты из предоставленного словаря task_dates
+                try:
+                    start_date = datetime.datetime.strptime(task_dates[task_id]['start'], '%Y-%m-%d')
+                    end_date = datetime.datetime.strptime(task_dates[task_id]['end'], '%Y-%m-%d')
+                    task_list.append((task, start_date, end_date))
+                    logger.debug(
+                        f"Задача {task_id} '{task['name']}': {start_date.strftime('%Y-%m-%d')} - {end_date.strftime('%Y-%m-%d')}")
+                except ValueError as e:
+                    logger.error(f"Ошибка при обработке дат для задачи {task_id}: {e}")
+                    # В случае ошибки используем дату проекта
+                    start_date = datetime.datetime.strptime(project['start_date'], '%Y-%m-%d')
+                    end_date = start_date + datetime.timedelta(days=task['duration'] - 1)
+                    task_list.append((task, start_date, end_date))
             else:
                 # Если нет дат, используем даты проекта
-                start_date = datetime.strptime(project['start_date'], '%Y-%m-%d')
-                end_date = start_date + timedelta(days=task['duration'] - 1)  # -1 т.к. включительно
+                start_date = datetime.datetime.strptime(project['start_date'], '%Y-%m-%d')
+                end_date = start_date + datetime.timedelta(days=task['duration'] - 1)  # -1 т.к. включительно
                 task_list.append((task, start_date, end_date))
+                logger.debug(
+                    f"Задача {task_id} '{task['name']}' без дат в task_dates, используем расчетные: {start_date.strftime('%Y-%m-%d')} - {end_date.strftime('%Y-%m-%d')}")
 
         # Сортировка по дате начала
         task_list.sort(key=lambda x: x[1])
@@ -59,15 +80,15 @@ class GanttChart:
             start_dates.append(start)
             # КРИТИЧЕСКИ ВАЖНО: для правильного отображения прямоугольников
             # конечная дата должна быть на следующий день после фактического окончания
-            end_dates.append(end + timedelta(days=1))  # Добавляем день для невключительной даты
+            end_dates.append(end + datetime.timedelta(days=1))  # Добавляем день для невключительной даты
 
         # Определяем общие даты проекта
         project_start = min(start_dates) if start_dates else datetime.strptime(project['start_date'], '%Y-%m-%d')
-        project_end = max([end - timedelta(days=1) for end in end_dates]) if end_dates else project_start + timedelta(
+        project_end = max([end - datetime.timedelta(days=1) for end in end_dates]) if end_dates else project_start + timedelta(
             days=30)
 
         # Конец проекта для отображения (на день больше)
-        project_end_display = project_end + timedelta(days=1)
+        project_end_display = project_end + datetime.timedelta(days=1)
 
         # Создаем фигуру с нужными размерами
         fig_height = max(8, len(sorted_tasks) * 0.4 + 2)
@@ -100,12 +121,12 @@ class GanttChart:
 
             # Добавляем даты по бокам прямоугольника
             # Начальная дата
-            ax.text(start - timedelta(days=0.2), y_positions[i],
+            ax.text(start - datetime.timedelta(days=0.2), y_positions[i],
                     start.strftime('%d.%m'),
                     va='center', ha='right', fontsize=8)
 
             # Конечная дата (невключительная)
-            ax.text(end + timedelta(days=0.2), y_positions[i],
+            ax.text(end + datetime.timedelta(days=0.2), y_positions[i],
                     end.strftime('%d.%m'),
                     va='center', ha='left', fontsize=8)
 
@@ -116,7 +137,7 @@ class GanttChart:
         ax.set_ylabel('Задача')
 
         # Устанавливаем диапазон дат с небольшим запасом
-        date_padding = timedelta(days=max(3, int((project_end_display - project_start).days * 0.05)))
+        date_padding = datetime.timedelta(days=max(3, int((project_end_display - project_start).days * 0.05)))
         ax.set_xlim(project_start - date_padding, project_end_display + date_padding)
 
         # Форматируем заголовок с добавлением длительности проекта

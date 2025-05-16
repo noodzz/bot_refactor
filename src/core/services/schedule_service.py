@@ -9,7 +9,7 @@ from src.core.algorithms.network_model import NetworkModel
 from src.core.algorithms.resource_allocation import (
     check_employee_availability,
     find_suitable_employee,
-    find_suitable_employee_with_days_off, find_available_date
+    find_suitable_employee_with_days_off, find_available_date, topological_sort
 )
 from src.core.services.employee_service import EmployeeService
 from src.core.services.task_service import TaskService
@@ -158,7 +158,10 @@ class ScheduleService:
 
                 except Exception as e:
                     logger.error(f"Ошибка при назначении сотрудника на задачу {task_id}: {str(e)}")
-
+            # Проверяем корректность зависимостей
+            logger.info("Проверка корректности зависимостей между задачами...")
+            corrected_task_dates = self._validate_task_dependencies(result['task_dates'], tasks)
+            result['task_dates'] = corrected_task_dates
             # Обрабатываем подзадачи для групповых задач
             self._process_subtasks_for_groups(result['task_dates'], employee_workload)
 
@@ -378,3 +381,183 @@ class ScheduleService:
 
             except Exception as e:
                 logger.error(f"Ошибка при обработке подзадач для групповой задачи {group_id}: {str(e)}")
+
+    def _validate_task_dependencies(self, task_dates: Dict[int, Dict[str, str]],
+                                    tasks: List[Dict[str, Any]]) -> Dict[int, Dict[str, str]]:
+        """
+        Проверяет и корректирует даты задач с учетом зависимостей
+
+        Args:
+            task_dates: Словарь с датами задач
+            tasks: Список задач проекта
+
+        Returns:
+            Dict[int, Dict[str, str]]: Скорректированный словарь с датами задач
+        """
+        # Создаем копию, чтобы не изменять оригинальный словарь
+        corrected_dates = {}
+        for task_id, dates in task_dates.items():
+            corrected_dates[task_id] = dates.copy()
+
+        # Строим словарь зависимостей для быстрого доступа
+        dependencies = {}
+        task_by_id = {}
+
+        for task in tasks:
+            task_id = task.get('id')
+            if not task_id:
+                continue
+
+            task_by_id[task_id] = task
+
+            # Получаем список предшественников
+            predecessors = []
+            pred_data = task.get('predecessors', [])
+            if isinstance(pred_data, list):
+                predecessors = pred_data
+            elif isinstance(pred_data, str) and pred_data.strip():
+                try:
+                    import json
+                    # Пробуем парсить JSON
+                    predecessors = json.loads(pred_data)
+                except Exception as e:
+                    logger.warning(f"Не удалось разобрать предшественников для задачи {task_id}: {e}")
+
+            dependencies[task_id] = predecessors
+
+        sorted_tasks = topological_sort(dependencies)
+
+        # Проверяем зависимости для каждой задачи
+        for task_id in sorted_tasks:
+            if task_id not in corrected_dates:
+                continue  # Пропускаем задачи без дат
+
+            # Получаем предшественников текущей задачи
+            predecessors = dependencies.get(task_id, [])
+
+            # Если нет предшественников, переходим к следующей задаче
+            if not predecessors:
+                continue
+
+            # Получаем дату начала текущей задачи
+            task_dates = corrected_dates[task_id]
+            task_start_str = task_dates['start']
+            task_start = datetime.datetime.strptime(task_start_str, '%Y-%m-%d')
+
+            # Проверяем всех предшественников
+            needs_adjustment = False
+            latest_end_date = None
+
+            for pred_id in predecessors:
+                if pred_id not in corrected_dates:
+                    continue  # Пропускаем предшественников без дат
+
+                # Получаем дату окончания предшественника
+                pred_dates = corrected_dates[pred_id]
+                pred_end_str = pred_dates['end']
+                pred_end = datetime.datetime.strptime(pred_end_str, '%Y-%m-%d')
+
+                # Если предшественник заканчивается позже текущей даты начала задачи
+                if pred_end >= task_start:
+                    needs_adjustment = True
+                    if latest_end_date is None or pred_end > latest_end_date:
+                        latest_end_date = pred_end
+
+            # Если требуется корректировка
+            if needs_adjustment and latest_end_date:
+                # Рассчитываем новые даты
+                new_start_date = latest_end_date + datetime.timedelta(days=1)
+
+                # Получаем длительность задачи
+                task_duration = 0
+                if task_id in task_by_id:
+                    task_info = task_by_id[task_id]
+                    task_duration = task_info.get('duration', 0) - 1  # -1 т.к. включаем последний день
+                else:
+                    # Вычисляем длительность из дат
+                    task_end = datetime.datetime.strptime(task_dates['end'], '%Y-%m-%d')
+                    task_duration = (task_end - task_start).days
+
+                # Вычисляем новую дату окончания
+                new_end_date = new_start_date + datetime.timedelta(days=task_duration)
+
+                # Обновляем даты
+                old_dates = corrected_dates[task_id].copy()
+                corrected_dates[task_id] = {
+                    'start': new_start_date.strftime('%Y-%m-%d'),
+                    'end': new_end_date.strftime('%Y-%m-%d')
+                }
+
+                logger.info(
+                    f"Скорректированы даты для задачи {task_id} '{task_by_id.get(task_id, {}).get('name', f'Задача {task_id}')}' "
+                    f"с {old_dates['start']} - {old_dates['end']} "
+                    f"на {corrected_dates[task_id]['start']} - {corrected_dates[task_id]['end']} "
+                    f"из-за зависимостей от предшественников"
+                )
+
+                # После изменения дат текущей задачи
+                # необходимо проверить задачи, зависящие от нее
+                self._adjust_dependent_tasks(task_id, corrected_dates, dependencies, task_by_id)
+
+        return corrected_dates
+
+    def _adjust_dependent_tasks(self, task_id: int, task_dates: Dict[int, Dict[str, str]],
+                                dependencies: Dict[int, List[int]], task_by_id: Dict[int, Dict[str, Any]]):
+        """
+        Рекурсивно корректирует даты зависимых задач
+
+        Args:
+            task_id: ID задачи, даты которой были изменены
+            task_dates: Словарь с датами задач
+            dependencies: Словарь зависимостей
+            task_by_id: Словарь задач по ID
+        """
+        import datetime
+
+        # Находим все задачи, зависящие от данной
+        dependent_tasks = []
+        for dep_id, preds in dependencies.items():
+            if task_id in preds:
+                dependent_tasks.append(dep_id)
+
+        # Корректируем даты зависимых задач
+        for dep_id in dependent_tasks:
+            if dep_id not in task_dates:
+                continue
+
+            # Получаем даты текущей задачи и зависимой
+            task_end_date = datetime.datetime.strptime(task_dates[task_id]['end'], '%Y-%m-%d')
+            dep_start_date = datetime.datetime.strptime(task_dates[dep_id]['start'], '%Y-%m-%d')
+
+            # Если начало зависимой задачи раньше окончания текущей, корректируем
+            if dep_start_date <= task_end_date:
+                # Новое начало - день после окончания текущей задачи
+                new_start_date = task_end_date + datetime.timedelta(days=1)
+
+                # Длительность зависимой задачи
+                dep_duration = 0
+                if dep_id in task_by_id:
+                    dep_duration = task_by_id[dep_id].get('duration', 1) - 1  # -1 т.к. включаем последний день
+                else:
+                    # Вычисляем длительность из дат
+                    dep_end_date = datetime.datetime.strptime(task_dates[dep_id]['end'], '%Y-%m-%d')
+                    dep_duration = (dep_end_date - dep_start_date).days
+
+                # Новое окончание
+                new_end_date = new_start_date + datetime.timedelta(days=dep_duration)
+
+                # Обновляем даты
+                old_dates = task_dates[dep_id].copy()
+                task_dates[dep_id] = {
+                    'start': new_start_date.strftime('%Y-%m-%d'),
+                    'end': new_end_date.strftime('%Y-%m-%d')
+                }
+
+                logger.info(
+                    f"Скорректированы даты для зависимой задачи {dep_id} с {old_dates['start']} - {old_dates['end']} "
+                    f"на {task_dates[dep_id]['start']} - {task_dates[dep_id]['end']} "
+                    f"из-за изменения дат задачи {task_id}"
+                )
+
+                # Рекурсивно проверяем задачи, зависящие от этой
+                self._adjust_dependent_tasks(dep_id, task_dates, dependencies, task_by_id)
