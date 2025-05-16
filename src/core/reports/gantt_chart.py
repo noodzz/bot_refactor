@@ -1,91 +1,111 @@
-import datetime
-import logging
-
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import numpy as np
 import os
 import tempfile
-from typing import List, Dict, Any, Optional
+import datetime
+import logging
+from typing import List, Dict, Any, Optional, Set
 
-from src.utils.file_utils import create_safe_filename
+logger = logging.getLogger(__name__)
 
 
 class GanttChart:
-    """Генератор диаграммы Ганта для проекта"""
+    """Генератор диаграммы Ганта для проекта с корректным отображением критического пути"""
 
     def __init__(self):
         """Инициализирует генератор диаграммы Ганта"""
         self.temp_dir = tempfile.mkdtemp()
 
     def generate(self, project: Dict[str, Any], tasks: List[Dict[str, Any]],
-                 task_dates: Dict[int, Dict[str, str]], critical_path: Optional[List[int]] = None) -> str:
+                 task_dates: Dict[int, Dict[str, str]], critical_path: Optional[List[int]] = None,
+                 dependencies: Optional[Dict[int, List[int]]] = None) -> str:
         """
-        Генерирует диаграмму Ганта для проекта
+        Генерирует диаграмму Ганта для проекта с учетом зависимостей
 
         Args:
             project (dict): Информация о проекте
             tasks (list): Список задач проекта
             task_dates (dict): Словарь с датами начала и окончания задач
             critical_path (list, optional): Список ID задач, входящих в критический путь
+            dependencies (dict, optional): Словарь зависимостей между задачами
 
         Returns:
             str: Путь к созданному файлу диаграммы
         """
-        logger = logging.getLogger(__name__)
+        logger.info(f"Генерация диаграммы Ганта для проекта '{project.get('name')}'")
+
         # Фильтруем только основные задачи (без подзадач)
         main_tasks = [task for task in tasks if not task.get('parent_id')]
-        task_list = []
+
+        # Создаем словарь для быстрого доступа к задачам
+        task_dict = {task.get('id'): task for task in tasks}
+
+        # Проверяем наличие данных для генерации диаграммы
+        if not task_dates:
+            logger.warning("Нет данных о датах задач для генерации диаграммы Ганта")
+            return self._generate_empty_chart(project)
+
         logger.info(f"Получено {len(task_dates)} записей с датами для диаграммы Ганта")
 
-        # Преобразуем даты в объекты datetime и создаем список задач
-        for task in main_tasks:
-            if 'id' not in task:
-                continue
+        # Формируем список задач с датами, сортируя по дате начала
+        task_list = []
+        for task_id, dates in task_dates.items():
+            if task_id in task_dict:
+                task = task_dict[task_id]
 
-            task_id = task['id']
+                # Пропускаем подзадачи для основной диаграммы
+                if task.get('parent_id'):
+                    continue
 
-            if task_id in task_dates and 'start' in task_dates[task_id] and 'end' in task_dates[task_id]:
-                # Используем даты из предоставленного словаря task_dates
                 try:
-                    start_date = datetime.datetime.strptime(task_dates[task_id]['start'], '%Y-%m-%d')
-                    end_date = datetime.datetime.strptime(task_dates[task_id]['end'], '%Y-%m-%d')
-                    task_list.append((task, start_date, end_date))
-                    logger.debug(
-                        f"Задача {task_id} '{task['name']}': {start_date.strftime('%Y-%m-%d')} - {end_date.strftime('%Y-%m-%d')}")
-                except ValueError as e:
-                    logger.error(f"Ошибка при обработке дат для задачи {task_id}: {e}")
-                    # В случае ошибки используем дату проекта
-                    start_date = datetime.datetime.strptime(project['start_date'], '%Y-%m-%d')
-                    end_date = start_date + datetime.timedelta(days=task['duration'] - 1)
-                    task_list.append((task, start_date, end_date))
-            else:
-                # Если нет дат, используем даты проекта
-                start_date = datetime.datetime.strptime(project['start_date'], '%Y-%m-%d')
-                end_date = start_date + datetime.timedelta(days=task['duration'] - 1)  # -1 т.к. включительно
-                task_list.append((task, start_date, end_date))
-                logger.debug(
-                    f"Задача {task_id} '{task['name']}' без дат в task_dates, используем расчетные: {start_date.strftime('%Y-%m-%d')} - {end_date.strftime('%Y-%m-%d')}")
+                    start_date = datetime.datetime.strptime(dates['start'], '%Y-%m-%d')
+                    end_date = datetime.datetime.strptime(dates['end'], '%Y-%m-%d')
+                    is_critical = task_id in critical_path if critical_path else False
 
-        # Сортировка по дате начала
-        task_list.sort(key=lambda x: x[1])
+                    task_list.append({
+                        'id': task_id,
+                        'name': task.get('name', f'Задача {task_id}'),
+                        'duration': task.get('duration', 1),
+                        'start': start_date,
+                        'end': end_date,
+                        'is_critical': is_critical
+                    })
+
+                    logger.debug(
+                        f"Задача {task_id} '{task.get('name')}': "
+                        f"{start_date.strftime('%Y-%m-%d')} - {end_date.strftime('%Y-%m-%d')}"
+                    )
+                except Exception as e:
+                    logger.error(f"Ошибка при обработке дат для задачи {task_id}: {e}")
+
+        # Сортируем задачи по дате начала
+        task_list.sort(key=lambda x: x['start'])
 
         # Создаем списки для построения диаграммы
         sorted_tasks = []
         start_dates = []
         end_dates = []
+        colors = []
 
-        for task, start, end in task_list:
+        for task in task_list:
             sorted_tasks.append(task)
-            start_dates.append(start)
+            start_dates.append(task['start'])
             # КРИТИЧЕСКИ ВАЖНО: для правильного отображения прямоугольников
             # конечная дата должна быть на следующий день после фактического окончания
-            end_dates.append(end + datetime.timedelta(days=1))  # Добавляем день для невключительной даты
+            end_dates.append(task['end'] + datetime.timedelta(days=1))
+
+            # Определяем цвет задачи (красный для критического пути)
+            colors.append('r' if task['is_critical'] else 'b')
 
         # Определяем общие даты проекта
-        project_start = min(start_dates) if start_dates else datetime.strptime(project['start_date'], '%Y-%m-%d')
-        project_end = max([end - datetime.timedelta(days=1) for end in end_dates]) if end_dates else project_start + timedelta(
-            days=30)
+        if start_dates and end_dates:
+            project_start = min(start_dates)
+            project_end = max([end - datetime.timedelta(days=1) for end in end_dates])
+        else:
+            # Если нет задач с датами, используем даты проекта
+            project_start = datetime.datetime.strptime(project.get('start_date', '2025-01-01'), '%Y-%m-%d')
+            project_end = project_start + datetime.timedelta(days=30)
 
         # Конец проекта для отображения (на день больше)
         project_end_display = project_end + datetime.timedelta(days=1)
@@ -98,21 +118,9 @@ class GanttChart:
         labels = [f"{task['name']} ({task['duration']} дн.)" for task in sorted_tasks]
         y_positions = np.arange(len(labels))
 
-        # Цвета для критического пути и обычных задач
-        colors = []
-        if critical_path:
-            for task in sorted_tasks:
-                if task['id'] in critical_path:
-                    colors.append('r')  # Красный для задач критического пути
-                else:
-                    colors.append('b')  # Синий для обычных задач
-        else:
-            colors = ['b'] * len(sorted_tasks)
-
         # Рисуем горизонтальные полосы для задач
         for i, (start, end, task, color) in enumerate(zip(start_dates, end_dates, sorted_tasks, colors)):
             # Вычисляем ширину полосы в днях
-            # КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: Используем разницу между датами для вычисления ширины
             width_days = (end - start).days
 
             # Рисуем прямоугольник
@@ -127,8 +135,12 @@ class GanttChart:
 
             # Конечная дата (невключительная)
             ax.text(end + datetime.timedelta(days=0.2), y_positions[i],
-                    end.strftime('%d.%m'),
+                    (end - datetime.timedelta(days=1)).strftime('%d.%m'),
                     va='center', ha='left', fontsize=8)
+
+        # Если есть информация о зависимостях, отображаем их стрелками
+        if dependencies:
+            self._draw_dependencies(ax, sorted_tasks, dependencies, task_dict, y_positions)
 
         # Настраиваем оси
         ax.set_yticks(y_positions)
@@ -142,7 +154,8 @@ class GanttChart:
 
         # Форматируем заголовок с добавлением длительности проекта
         project_duration = (project_end - project_start).days + 1  # +1 т.к. включительно
-        ax.set_title(f'Диаграмма Ганта для проекта "{project["name"]}"\nДлительность: {project_duration} дней')
+        ax.set_title(f'Диаграмма Ганта для проекта "{project.get("name", "Проект")}"'
+                     f'\nДлительность: {project_duration} дней')
 
         # Добавляем сетку
         ax.grid(True, axis='x', linestyle='--', alpha=0.7)
@@ -172,6 +185,14 @@ class GanttChart:
         ax.text(project_end_display, -1, f"Окончание: {project_end.strftime('%d.%m.%Y')}",
                 ha='center', va='top', color='g', fontweight='bold')
 
+        # Добавляем легенду
+        from matplotlib.lines import Line2D
+        legend_elements = [
+            Line2D([0], [0], color='r', lw=4, label='Критический путь'),
+            Line2D([0], [0], color='b', lw=4, label='Обычные задачи')
+        ]
+        ax.legend(handles=legend_elements, loc='upper right')
+
         # Добавляем примечание о формате дат
         fig.text(0.5, 0.01,
                  "Примечание: Конечные даты указаны невключительно. Например, задача '19.05 - 21.05' продолжается до конца дня 20.05.",
@@ -181,7 +202,91 @@ class GanttChart:
         fig.tight_layout(rect=[0, 0.03, 1, 0.97])  # Оставляем место для примечания
 
         # Создаем безопасное имя файла
-        safe_project_name = create_safe_filename(project['name'])
+        safe_project_name = "".join(
+            c if c.isalnum() or c in [' ', '.', '_', '-'] else '_' for c in project.get('name', 'project')
+        )
+
+        # Сохраняем диаграмму
+        chart_file = os.path.join(self.temp_dir, f"{safe_project_name}_gantt.png")
+        plt.savefig(chart_file, dpi=200, bbox_inches='tight')
+        plt.close(fig)
+
+        logger.info(f"Диаграмма Ганта сохранена в файл: {chart_file}")
+        return chart_file
+
+    def _draw_dependencies(self, ax, tasks, dependencies, task_dict, y_positions):
+        """
+        Отображает зависимости между задачами стрелками
+
+        Args:
+            ax: Объект графика matplotlib
+            tasks: Список задач с датами
+            dependencies: Словарь зависимостей
+            task_dict: Словарь задач для быстрого доступа
+            y_positions: Позиции задач по оси Y
+        """
+        # Создаем словарь для быстрого доступа к позициям задач
+        task_positions = {}
+        for i, task in enumerate(tasks):
+            task_positions[task['id']] = i
+
+        # Для каждой задачи отображаем ее зависимости
+        for task in tasks:
+            task_id = task['id']
+
+            # Получаем предшественников задачи
+            preds = dependencies.get(task_id, [])
+
+            # Отображаем зависимости стрелками
+            for pred_id in preds:
+                # Проверяем, что предшественник есть в списке задач
+                if pred_id not in task_positions:
+                    continue
+
+                # Получаем позиции задач
+                pred_pos = task_positions[pred_id]
+                task_pos = task_positions[task_id]
+
+                # Получаем даты окончания предшественника и начала текущей задачи
+                pred_end = tasks[pred_pos]['end'] + datetime.timedelta(days=1)
+                task_start = tasks[task_pos]['start']
+
+                # Отображаем стрелку зависимости, если даты соблюдают зависимость
+                if pred_end <= task_start:
+                    # Уже все корректно, стрелку не рисуем
+                    continue
+
+                # Стрелка зависимости
+                ax.annotate('',
+                            xy=(tasks[task_pos]['start'], y_positions[task_pos]),
+                            xytext=(tasks[pred_pos]['end'] + datetime.timedelta(days=1), y_positions[pred_pos]),
+                            arrowprops=dict(arrowstyle='->', linestyle='--', color='gray', alpha=0.6))
+
+    def _generate_empty_chart(self, project):
+        """
+        Генерирует пустую диаграмму, если нет данных о задачах
+
+        Args:
+            project: Информация о проекте
+
+        Returns:
+            str: Путь к созданному файлу диаграммы
+        """
+        fig, ax = plt.subplots(figsize=(10, 6))
+
+        ax.text(0.5, 0.5, "Нет данных для построения диаграммы Ганта",
+                horizontalalignment='center', verticalalignment='center',
+                transform=ax.transAxes, fontsize=14)
+
+        ax.set_title(f'Диаграмма Ганта для проекта "{project.get("name", "Проект")}"')
+
+        # Удаляем оси
+        ax.set_axis_off()
+
+        # Создаем безопасное имя файла
+        safe_project_name = "".join(
+            c if c.isalnum() or c in [' ', '.', '_', '-'] else '_' for c in project.get('name', 'project')
+        )
 
         # Сохраняем диаграмму
         chart_file = os.path.join(self.temp_dir, f"{safe_project_name}_gantt.png")

@@ -1,7 +1,6 @@
+from typing import List, Dict, Any, Optional, Set
+from collections import deque
 import datetime
-import json
-from collections import defaultdict, deque
-from typing import Dict, List, Tuple, Any, Optional, Set
 import logging
 
 logger = logging.getLogger(__name__)
@@ -10,6 +9,7 @@ logger = logging.getLogger(__name__)
 class NetworkModel:
     """
     Класс для работы с сетевой моделью проекта по методу критического пути (CPM)
+    с использованием алгоритма Форда и строгим соблюдением зависимостей
     """
 
     def __init__(self):
@@ -19,13 +19,15 @@ class NetworkModel:
         self.task_mapping = None
         self.reverse_mapping = None
 
-    def calculate(self, project: Dict[str, Any], tasks: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def calculate(self, project, tasks, employee_service=None):
         """
         Рассчитывает календарный план проекта, используя алгоритм Форда
+        с учетом выходных дней и строгим соблюдением зависимостей
 
         Args:
             project (dict): Информация о проекте
             tasks (list): Список задач проекта
+            employee_service: Сервис для работы с сотрудниками (для учета выходных)
 
         Returns:
             dict: Результаты расчета (длительность проекта, критический путь, даты задач)
@@ -58,8 +60,7 @@ class NetworkModel:
 
         # Проверяем граф на цикличность
         if self._has_cycle():
-            logger.warning("Обнаружен цикл в графе зависимостей. "
-                           "Невозможно рассчитать календарный план.")
+            logger.warning("Обнаружен цикл в графе зависимостей! Результаты расчета могут быть некорректными.")
             return {
                 'duration': 0,
                 'critical_path': [],
@@ -101,49 +102,64 @@ class NetworkModel:
         # Определяем резервы времени
         reserves = self._calculate_reserves(early_times, late_times)
 
-        # Находим критический путь
+        # Находим критический путь на основе резервов времени
         critical_path = self._find_critical_path(reserves)
 
+        # Получаем зависимости между задачами
+        dependencies = self._get_all_dependencies()
+
+        # Создаем словарь задач для быстрого доступа
+        task_dict = {task.get('id'): task for task in tasks}
+
         # Вычисляем даты начала и окончания задач
-        task_dates = self._calculate_task_dates(project['start_date'], early_times)
+        # В зависимости от наличия сервиса сотрудников используем разные методы
+        if employee_service:
+            # Используем улучшенный метод с учетом выходных дней
+            task_dates = self._calculate_task_dates_with_days_off(project['start_date'], early_times, employee_service)
+        else:
+            # Используем простой метод без учета выходных
+            task_dates = self._calculate_task_dates(project['start_date'], early_times)
 
-        # Длительность проекта
-        project_duration = early_times[-1] if early_times and len(early_times) > 0 else 0
+        # КЛЮЧЕВОЕ УЛУЧШЕНИЕ: корректируем даты с учетом зависимостей
+        task_dates = self._correct_dates_for_dependencies(task_dates, dependencies, task_dict)
 
-        # Если длительность все еще 0, но есть даты задач, вычисляем по датам
-        if project_duration == 0 and task_dates:
-            end_dates = []
-            for task_id, dates in task_dates.items():
-                if 'end' in dates:
-                    try:
-                        end_date = datetime.datetime.strptime(dates['end'], '%Y-%m-%d')
-                        start_date = datetime.datetime.strptime(project['start_date'], '%Y-%m-%d')
-                        days_diff = (end_date - start_date).days + 1
-                        end_dates.append(days_diff)
-                    except (ValueError, TypeError):
-                        pass
+        # Длительность проекта (в рабочих днях)
+        workday_duration = early_times[-1] if early_times and len(early_times) > 0 else 0
 
-            if end_dates:
-                project_duration = max(end_dates)
+        # Определяем календарную длительность проекта
+        if task_dates:
+            start_dates = [datetime.datetime.strptime(dates['start'], '%Y-%m-%d') for dates in task_dates.values()]
+            end_dates = [datetime.datetime.strptime(dates['end'], '%Y-%m-%d') for dates in task_dates.values()]
+
+            if start_dates and end_dates:
+                project_start = min(start_dates)
+                project_end = max(end_dates)
+                calendar_duration = (project_end - project_start).days + 1  # +1 для включения дня окончания
+            else:
+                calendar_duration = workday_duration
+        else:
+            calendar_duration = workday_duration
 
         return {
-            'duration': project_duration,
+            'duration': calendar_duration,
+            'workday_duration': workday_duration,
             'critical_path': critical_path,
             'task_dates': task_dates,
             'early_times': early_times,
             'late_times': late_times,
-            'reserves': reserves
+            'reserves': reserves,
+            'dependencies': dependencies  # Добавляем зависимости в результат
         }
 
-    def _build_graph(self, tasks: List[Dict[str, Any]]) -> Optional[Dict[int, List[Tuple[int, int]]]]:
+    def _build_graph(self, tasks):
         """
-        Строит сетевую модель на основе задач проекта
+        Строит сетевую модель (граф) на основе задач проекта
 
         Args:
             tasks (list): Список задач проекта
 
         Returns:
-            dict: Граф зависимостей
+            dict: Граф зависимостей в формате {node: [(neighbor, weight)]}
         """
         # Проверяем, что список задач не пуст
         if not tasks:
@@ -154,7 +170,7 @@ class NetworkModel:
         self.reverse_mapping = {}
 
         # Инициализируем граф
-        graph = defaultdict(list)
+        graph = {}
 
         # Добавляем фиктивный источник (вершина 0)
         graph[0] = []
@@ -191,6 +207,11 @@ class NetworkModel:
             for dep_id in dependencies:
                 task_has_dependents.add(dep_id)
 
+        # Инициализируем вершины графа
+        for i in range(node_id + 1):
+            if i not in graph:
+                graph[i] = []
+
         # Добавляем дуги в граф
         for task in tasks:
             if 'id' not in task:  # Пропускаем задачи без id
@@ -219,20 +240,25 @@ class NetworkModel:
 
         return graph
 
-    def _get_task_dependencies(self, task_id: int) -> List[int]:
+    def _get_task_dependencies(self, task_id):
         """
         Возвращает список идентификаторов задач, от которых зависит указанная задача
+
+        Args:
+            task_id: ID задачи
+
+        Returns:
+            list: Список ID задач-предшественников
         """
+        import json
+
         dependencies = []
 
-        # Проверяем сначала в таблице dependencies
+        # Проверяем сначала в атрибуте predecessors
         for task in self.tasks:
             if task.get('id') == task_id and 'predecessors' in task:
                 # Пытаемся получить предшественников
                 task_predecessors = task.get('predecessors')
-
-                logger.info(
-                    f"Задача {task_id}: предшественники из БД = {task_predecessors}, тип: {type(task_predecessors)}")
 
                 # Преобразуем предшественников в список
                 if isinstance(task_predecessors, list):
@@ -242,20 +268,35 @@ class NetworkModel:
                         # Пытаемся преобразовать JSON-строку в список
                         dependencies = json.loads(task_predecessors)
                     except json.JSONDecodeError:
-                        logger.error(
-                            f"Ошибка при разборе JSON предшественников для задачи {task_id}: {task_predecessors}")
                         dependencies = []
 
                 # Если это не список, создаем пустой список
                 if not isinstance(dependencies, list):
                     dependencies = []
 
-                logger.info(f"Задача {task_id}: итоговые предшественники = {dependencies}")
                 break
 
         return dependencies
 
-    def _has_cycle(self) -> bool:
+    def _get_all_dependencies(self):
+        """
+        Возвращает все зависимости между задачами проекта
+
+        Returns:
+            dict: Словарь с зависимостями, где ключ - ID задачи, значение - список ID зависимостей
+        """
+        dependencies = {}
+
+        for task in self.tasks:
+            task_id = task.get('id')
+            if task_id is None:
+                continue
+
+            dependencies[task_id] = self._get_task_dependencies(task_id)
+
+        return dependencies
+
+    def _has_cycle(self):
         """
         Проверяет граф на наличие циклов
 
@@ -292,9 +333,9 @@ class NetworkModel:
 
         return False
 
-    def _calculate_early_times(self) -> List[int]:
+    def _calculate_early_times(self):
         """
-        Вычисляет наиболее ранние времена наступления событий, используя алгоритм Форда
+        Вычисляет ранние времена наступления событий, используя алгоритм Форда
 
         Returns:
             list: Список ранних времен наступления для каждой вершины
@@ -325,8 +366,8 @@ class NetworkModel:
             changed = False
             iteration_count += 1
 
-            for node in graph_copy:
-                for neighbor, weight in graph_copy[node]:
+            for node in range(n):
+                for neighbor, weight in graph_copy.get(node, []):
                     # Проверяем, что neighbor не выходит за пределы списка
                     if 0 <= neighbor < n:
                         if early_times[neighbor] < early_times[node] + weight:
@@ -335,9 +376,9 @@ class NetworkModel:
 
         return early_times
 
-    def _calculate_late_times(self, early_times: List[int]) -> List[int]:
+    def _calculate_late_times(self, early_times):
         """
-        Вычисляет наиболее поздние времена наступления событий
+        Вычисляет поздние времена наступления событий
 
         Args:
             early_times (list): Список ранних времен наступления
@@ -359,22 +400,21 @@ class NetworkModel:
         # Общая длительность проекта - это раннее время наступления последнего события
         project_duration = early_times[n - 1]
 
-        # Инициализируем массив поздних времен
+        # Инициализируем массив поздних времен максимальным значением (длительность проекта)
         late_times = [project_duration] * n
 
-        # Строим обратный граф
-        reverse_graph = defaultdict(list)
+        # Создаем обратный граф
+        reverse_graph = {}
+        for i in range(n):
+            reverse_graph[i] = []
 
-        # Создаем копию графа для безопасной итерации
-        graph_copy = {k: list(v) for k, v in self.graph.items()}
-
-        for node in graph_copy:
-            for neighbor, weight in graph_copy[node]:
-                # Проверяем, что neighbor не выходит за пределы списка
+        # Заполняем обратный граф
+        for node, edges in self.graph.items():
+            for neighbor, weight in edges:
                 if 0 <= neighbor < n:
                     reverse_graph[neighbor].append((node, weight))
 
-        # Выполняем алгоритм Форда для обратного графа
+        # Выполняем алгоритм Форда для обратного графа (проход назад)
         changed = True
         iteration_count = 0
         max_iterations = n * 10  # Ограничение на количество итераций
@@ -384,16 +424,16 @@ class NetworkModel:
             iteration_count += 1
 
             for node in range(n - 1, -1, -1):
-                for neighbor, weight in reverse_graph.get(node, []):
-                    # Проверяем, что neighbor не выходит за пределы списка
-                    if 0 <= neighbor < n:
-                        if late_times[neighbor] > late_times[node] - weight:
-                            late_times[neighbor] = late_times[node] - weight
+                for predecessor, weight in reverse_graph.get(node, []):
+                    # Проверяем, что predecessor не выходит за пределы списка
+                    if 0 <= predecessor < n:
+                        if late_times[predecessor] > late_times[node] - weight:
+                            late_times[predecessor] = late_times[node] - weight
                             changed = True
 
         return late_times
 
-    def _calculate_reserves(self, early_times: List[int], late_times: List[int]) -> List[int]:
+    def _calculate_reserves(self, early_times, late_times):
         """
         Вычисляет резервы времени для каждой вершины
 
@@ -410,9 +450,9 @@ class NetworkModel:
 
         return reserves
 
-    def _find_critical_path(self, reserves: List[int]) -> List[int]:
+    def _find_critical_path(self, reserves):
         """
-        Находит критический путь в графе
+        Находит критический путь в графе (вершины с нулевым резервом)
 
         Args:
             reserves (list): Список резервов времени
@@ -422,14 +462,12 @@ class NetworkModel:
         """
         critical_nodes = []
 
-        if not reserves or len(reserves) <= 2:  # Проверяем, что у нас есть хотя бы один узел (кроме источника и стока)
-            return critical_nodes
-
+        # Находим вершины с нулевым резервом времени (исключая источник и сток)
         for node, reserve in enumerate(reserves):
-            if reserve == 0 and node > 0 and node < len(reserves) - 1:  # Исключаем источник и сток
+            if reserve == 0 and node > 0 and node < len(reserves) - 1:
                 critical_nodes.append(node)
 
-        # Преобразуем идентификаторы вершин в идентификаторы задач
+        # Преобразуем номера вершин в идентификаторы задач
         critical_path = []
         for node in critical_nodes:
             if node in self.reverse_mapping and self.reverse_mapping[node] != 'sink':
@@ -437,9 +475,9 @@ class NetworkModel:
 
         return critical_path
 
-    def _calculate_task_dates(self, project_start_date: str, early_times: List[int]) -> Dict[int, Dict[str, str]]:
+    def _calculate_task_dates(self, project_start_date, early_times):
         """
-        Вычисляет даты начала и окончания задач с учетом зависимостей
+        Вычисляет даты начала и окончания задач на основе ранних времен
 
         Args:
             project_start_date (str): Дата начала проекта (YYYY-MM-DD)
@@ -448,146 +486,329 @@ class NetworkModel:
         Returns:
             dict: Словарь с датами начала и окончания для каждой задачи
         """
+        import datetime
+
         # Преобразуем дату начала проекта
         start_date = datetime.datetime.strptime(project_start_date, '%Y-%m-%d')
-        logger.info(f"Дата начала проекта: {start_date.strftime('%Y-%m-%d')}")
 
         # Словарь с датами для задач
         task_dates = {}
 
-        # Получаем все задачи
-        tasks = {}
-        for task in self.tasks:
-            if 'id' in task:
-                tasks[task['id']] = task
+        # Для каждой задачи вычисляем даты на основе ранних времен
+        for task_id, node_id in self.task_mapping.items():
+            # Находим соответствующую задачу
+            task = next((t for t in self.tasks if t.get('id') == task_id), None)
+            if not task:
+                continue
 
-        logger.info(f"Найдено {len(tasks)} задач")
+            # Получаем раннее время начала задачи
+            early_start = early_times[node_id - 1] if node_id > 0 else 0
 
-        # Построим граф зависимостей (предшественники)
-        dependencies = {}
-        for task_id, task in tasks.items():
-            predecessors = self._get_task_dependencies(task_id)
-            dependencies[task_id] = predecessors
-            logger.info(f"Задача {task_id} ({task.get('name', '?')}): предшественники = {predecessors}")
+            # Вычисляем дату начала
+            task_start = start_date + datetime.timedelta(days=early_start)
 
-        # Вычисляем даты начала и окончания для каждой задачи
-        # Начнем с задач без предшественников
-        processed = set()
-        task_end_dates = {}  # ID задачи -> дата окончания
+            # Вычисляем дату окончания
+            task_duration = task.get('duration', 1)
+            task_end = task_start + datetime.timedelta(days=task_duration - 1)  # -1 т.к. включаем день начала
 
-        # Проходим по task_dates - уже имеющиеся даты имеют приоритет
-        for task_id, date_data in task_dates.items():
-            if 'start' in date_data and 'end' in date_data:
-                start_dt = datetime.datetime.strptime(date_data['start'], '%Y-%m-%d')
-                end_dt = datetime.datetime.strptime(date_data['end'], '%Y-%m-%d')
-                task_end_dates[task_id] = end_dt
-                processed.add(task_id)
-                logger.info(f"Задача {task_id}: использую заданные даты {date_data['start']} - {date_data['end']}")
-
-        # Повторяем, пока не обработаем все задачи
-        remaining = set(tasks.keys()) - processed
-
-        # Пока есть необработанные задачи
-        while remaining:
-            # Найдем задачи, все предшественники которых уже обработаны
-            ready_tasks = []
-            for task_id in remaining:
-                # Проверяем, все ли предшественники обработаны
-                all_predecessors_done = True
-                for pred_id in dependencies.get(task_id, []):
-                    if pred_id not in processed:
-                        all_predecessors_done = False
-                        break
-
-                if all_predecessors_done:
-                    ready_tasks.append(task_id)
-
-            # Если нет готовых задач, но остались необработанные,
-            # значит у нас есть циклическая зависимость
-            if not ready_tasks and remaining:
-                logger.warning("Обнаружена циклическая зависимость! Обрабатываем все оставшиеся задачи.")
-                ready_tasks = list(remaining)
-
-            # Обрабатываем готовые задачи
-            for task_id in ready_tasks:
-                task = tasks[task_id]
-
-                # Определяем дату начала задачи
-                task_start = start_date  # По умолчанию - дата начала проекта
-
-                # Если есть предшественники, дата начала - день после окончания самого позднего предшественника
-                for pred_id in dependencies.get(task_id, []):
-                    if pred_id in task_end_dates:
-                        pred_end = task_end_dates[pred_id]
-                        next_day = pred_end + datetime.timedelta(days=1)
-                        if next_day > task_start:
-                            task_start = next_day
-
-                # Определяем дату окончания задачи
-                duration = task.get('duration', 1)
-                task_end = task_start + datetime.timedelta(days=duration - 1)  # -1, так как включаем последний день
-
-                # Сохраняем даты
-                task_dates[task_id] = {
-                    'start': task_start.strftime('%Y-%m-%d'),
-                    'end': task_end.strftime('%Y-%m-%d')
-                }
-
-                # Сохраняем дату окончания для будущих зависимых задач
-                task_end_dates[task_id] = task_end
-
-                # Помечаем задачу как обработанную
-                processed.add(task_id)
-                remaining.remove(task_id)
-
-                logger.info(
-                    f"Задача {task_id} ({task.get('name', '?')}): {task_start.strftime('%Y-%m-%d')} - {task_end.strftime('%Y-%m-%d')}")
+            # Сохраняем даты
+            task_dates[task_id] = {
+                'start': task_start.strftime('%Y-%m-%d'),
+                'end': task_end.strftime('%Y-%m-%d')
+            }
 
         return task_dates
 
-    def _topological_sort(self, dependencies: Dict[int, List[int]]) -> List[int]:
+    def _calculate_task_dates_with_days_off(self, project_start_date, early_times, employee_service):
         """
-        Выполняет топологическую сортировку графа зависимостей
+        Вычисляет даты начала и окончания задач с учетом выходных дней
 
         Args:
-            dependencies: Словарь зависимостей, где ключ - задача, значение - список предшественников
+            project_start_date (str): Дата начала проекта (YYYY-MM-DD)
+            early_times (list): Список ранних времен наступления
+            employee_service: Сервис для работы с сотрудниками
 
         Returns:
-            List[int]: Отсортированный список задач
+            dict: Словарь с датами начала и окончания для каждой задачи
         """
-        # Создаем обратный граф: для каждой задачи список задач, зависящих от неё
-        reversed_deps = {}
-        all_tasks = set()
+        import datetime
 
-        for task_id, predecessors in dependencies.items():
-            all_tasks.add(task_id)
-            for pred in predecessors:
-                all_tasks.add(pred)
-                if pred not in reversed_deps:
-                    reversed_deps[pred] = []
-                reversed_deps[pred].append(task_id)
+        # Преобразуем дату начала проекта
+        start_date = datetime.datetime.strptime(project_start_date, '%Y-%m-%d')
 
-        # Инициализация
-        visited = set()
+        # Получаем корпоративные выходные дни (по умолчанию суббота и воскресенье)
+        corp_days_off = [6, 7]  # 6=суббота, 7=воскресенье
+
+        # Словарь с датами для задач
+        task_dates = {}
+
+        # Для каждой задачи вычисляем даты на основе ранних времен
+        for task_id, node_id in self.task_mapping.items():
+            # Находим соответствующую задачу
+            task = next((t for t in self.tasks if t.get('id') == task_id), None)
+            if not task:
+                continue
+
+            # Получаем раннее время начала задачи в рабочих днях
+            early_start_workdays = early_times[node_id - 1] if node_id > 0 else 0
+
+            # Получаем дни, которые являются выходными для конкретной задачи
+            days_off = corp_days_off.copy()
+
+            # Если задаче назначен сотрудник с персональными выходными, учитываем их
+            employee_id = task.get('employee_id')
+            if employee_id and employee_service:
+                try:
+                    employee = employee_service.get_employee(employee_id)
+                    if employee and hasattr(employee, 'days_off') and employee.days_off:
+                        # Заменяем стандартные выходные на выходные сотрудника
+                        days_off = employee.days_off
+                except:
+                    pass  # Используем корпоративные выходные, если не удалось получить выходные сотрудника
+
+            # Вычисляем реальную дату начала с учетом выходных дней
+            current_date = start_date
+            workdays_count = 0
+
+            # Пропускаем выходные дни до начала задачи
+            while workdays_count < early_start_workdays:
+                # Проверяем, не выходной ли это день
+                weekday = current_date.weekday() + 1  # +1 чтобы привести к формату 1=пн, 7=вс
+                if weekday not in days_off:
+                    workdays_count += 1
+
+                current_date += datetime.timedelta(days=1)
+
+            # Отступаем на один день назад, так как последний день был уже учтен
+            task_start = current_date - datetime.timedelta(days=1)
+
+            # Пропускаем выходные в начале задачи, если задача начинается с выходного
+            weekday = task_start.weekday() + 1
+            while weekday in days_off:
+                task_start += datetime.timedelta(days=1)
+                weekday = task_start.weekday() + 1
+
+            # Вычисляем дату окончания с учетом выходных
+            task_duration = task.get('duration', 1)
+            workdays_count = 1  # Начинаем с 1, так как первый рабочий день уже найден
+            current_date = task_start + datetime.timedelta(days=1)
+
+            # Считаем рабочие дни до окончания задачи
+            while workdays_count < task_duration:
+                # Проверяем, не выходной ли это день
+                weekday = current_date.weekday() + 1
+                if weekday not in days_off:
+                    workdays_count += 1
+
+                current_date += datetime.timedelta(days=1)
+
+            # Отступаем на один день назад, так как последний день был уже учтен
+            task_end = current_date - datetime.timedelta(days=1)
+
+            # Сохраняем даты
+            task_dates[task_id] = {
+                'start': task_start.strftime('%Y-%m-%d'),
+                'end': task_end.strftime('%Y-%m-%d')
+            }
+
+        return task_dates
+
+    def _correct_dates_for_dependencies(self, task_dates, dependencies, task_dict):
+        """
+        Корректирует даты начала и окончания задач с учетом зависимостей
+
+        Args:
+            task_dates (dict): Исходные даты задач
+            dependencies (dict): Зависимости между задачами
+            task_dict (dict): Словарь задач для быстрого доступа
+
+        Returns:
+            dict: Скорректированные даты задач
+        """
+        import datetime
+        logger.info("Начинаем корректировку дат с учетом зависимостей")
+
+        # Создаем копию дат для изменения
+        corrected_dates = {}
+        for task_id, dates in task_dates.items():
+            corrected_dates[task_id] = dates.copy()
+
+        # Создаем список задач для топологической сортировки
+        task_list = []
+        for task_id in dependencies.keys():
+            if task_id in task_dict:
+                task_list.append(task_dict[task_id])
+
+        # Топологическая сортировка задач
+        sorted_tasks = self._topological_sort(task_list, dependencies)
+
+        # Для каждой задачи проверяем, все ли предшественники завершены до её начала
+        for task in sorted_tasks:
+            task_id = task.get('id')
+            if task_id not in corrected_dates:
+                continue
+
+            # Получаем текущую дату начала
+            start_date = datetime.datetime.strptime(corrected_dates[task_id]['start'], '%Y-%m-%d')
+
+            # Проверяем всех предшественников
+            predecessors = dependencies.get(task_id, [])
+
+            # Находим самую позднюю дату окончания предшественников
+            latest_end = None
+            for pred_id in predecessors:
+                if pred_id not in corrected_dates:
+                    continue
+
+                # Дата окончания предшественника
+                pred_end = datetime.datetime.strptime(corrected_dates[pred_id]['end'], '%Y-%m-%d')
+
+                # Обновляем самую позднюю дату
+                if latest_end is None or pred_end > latest_end:
+                    latest_end = pred_end
+
+            # Если нужно, смещаем задачу
+            if latest_end and start_date <= latest_end:
+                # Вычисляем новую дату начала (следующий день после окончания предшественника)
+                new_start = latest_end + datetime.timedelta(days=1)
+
+                # Получаем длительность задачи
+                duration = task.get('duration', 1)
+
+                # Вычисляем новую дату окончания
+                new_end = new_start + datetime.timedelta(days=duration - 1)
+
+                # Обновляем даты
+                corrected_dates[task_id] = {
+                    'start': new_start.strftime('%Y-%m-%d'),
+                    'end': new_end.strftime('%Y-%m-%d')
+                }
+
+                logger.info(
+                    f"Смещена задача {task_id} '{task.get('name')}' с {start_date.strftime('%Y-%m-%d')} на {new_start.strftime('%Y-%m-%d')} из-за зависимостей")
+
+                # Каскадно обновляем все зависимые задачи
+                self._update_dependent_tasks(task_id, dependencies, corrected_dates, task_dict)
+
+        return corrected_dates
+
+    def _update_dependent_tasks(self, task_id, dependencies, dates, task_dict):
+        """
+        Рекурсивно обновляет даты зависимых задач
+
+        Args:
+            task_id: ID задачи, даты которой изменились
+            dependencies: Словарь зависимостей
+            dates: Словарь с датами задач
+            task_dict: Словарь задач для быстрого доступа
+        """
+        import datetime
+
+        # Находим все задачи, которые зависят от текущей
+        dependent_tasks = []
+        for dep_id, preds in dependencies.items():
+            if task_id in preds:
+                dependent_tasks.append(dep_id)
+
+        # Если зависимых задач нет, выходим
+        if not dependent_tasks:
+            return
+
+        # Получаем дату окончания текущей задачи
+        end_date = datetime.datetime.strptime(dates[task_id]['end'], '%Y-%m-%d')
+
+        # Обрабатываем каждую зависимую задачу
+        for dep_id in dependent_tasks:
+            if dep_id not in dates or dep_id not in task_dict:
+                continue
+
+            # Получаем дату начала зависимой задачи
+            start_date = datetime.datetime.strptime(dates[dep_id]['start'], '%Y-%m-%d')
+
+            # Если начало зависимой задачи раньше или равно окончанию текущей,
+            # нужно сместить зависимую задачу
+            if start_date <= end_date:
+                # Новая дата начала - следующий день после окончания текущей задачи
+                new_start = end_date + datetime.timedelta(days=1)
+
+                # Получаем длительность зависимой задачи
+                task = task_dict[dep_id]
+                duration = task.get('duration', 1)
+
+                # Вычисляем новую дату окончания
+                new_end = new_start + datetime.timedelta(days=duration - 1)
+
+                # Обновляем даты
+                dates[dep_id] = {
+                    'start': new_start.strftime('%Y-%m-%d'),
+                    'end': new_end.strftime('%Y-%m-%d')
+                }
+
+                logger.info(
+                    f"Каскадное смещение: задача {dep_id} '{task.get('name')}' смещена на {new_start.strftime('%Y-%m-%d')} из-за изменения дат задачи {task_id}")
+
+                # Рекурсивно обновляем все задачи, зависящие от этой
+                self._update_dependent_tasks(dep_id, dependencies, dates, task_dict)
+
+    def _topological_sort(self, tasks, dependencies):
+        """
+        Выполняет топологическую сортировку списка задач с учетом зависимостей
+
+        Args:
+            tasks: Список задач
+            dependencies: Словарь зависимостей, где ключ - ID задачи, значение - список ID зависимостей
+
+        Returns:
+            list: Отсортированный список задач
+        """
+        # Создаем словарь для подсчета входящих ребер
+        in_degree = {}
+        for task in tasks:
+            task_id = task.get('id')
+            if task_id is not None:
+                in_degree[task_id] = 0
+
+        # Подсчитываем входящие ребра для каждой задачи
+        for task_id, deps in dependencies.items():
+            for dep_id in deps:
+                if dep_id in in_degree:
+                    in_degree[dep_id] += 1
+
+        # Очередь для задач без входящих ребер
+        queue = deque()
+        for task in tasks:
+            task_id = task.get('id')
+            if task_id is not None and task_id in in_degree and in_degree[task_id] == 0:
+                queue.append(task)
+
+        # Результат топологической сортировки
         sorted_tasks = []
 
-        # Рекурсивная функция для DFS
-        def dfs(task_id):
-            if task_id in visited:
-                return
-            visited.add(task_id)
+        # Обработка очереди
+        while queue:
+            task = queue.popleft()
+            sorted_tasks.append(task)
 
-            # Посещаем все зависимые задачи
-            for dependent in reversed_deps.get(task_id, []):
-                dfs(dependent)
+            task_id = task.get('id')
+            if task_id is None:
+                continue
 
-            # После посещения всех зависимых, добавляем текущую задачу
-            sorted_tasks.append(task_id)
+            # Находим все зависимые задачи
+            for dep_id in [id for id, deps in dependencies.items() if task_id in deps]:
+                if dep_id in in_degree:
+                    in_degree[dep_id] -= 1
+                    if in_degree[dep_id] == 0:
+                        # Находим задачу по ID
+                        for t in tasks:
+                            if t.get('id') == dep_id:
+                                queue.append(t)
+                                break
 
-        # Запускаем DFS с каждой задачи, которая не имеет предшественников
-        for task_id in all_tasks:
-            if not dependencies.get(task_id, []):
-                dfs(task_id)
+        # Проверяем, все ли задачи обработаны (может быть цикл)
+        if len(sorted_tasks) < len(tasks):
+            # Добавляем оставшиеся задачи в конец
+            for task in tasks:
+                if task not in sorted_tasks:
+                    sorted_tasks.append(task)
 
-        # Возвращаем задачи в порядке их выполнения
         return sorted_tasks
