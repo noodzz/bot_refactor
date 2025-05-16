@@ -6,8 +6,9 @@ from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile
 
-from src.utils.helpers import format_date, is_authorized
-from src.utils.date_utils import validate_date_format
+from src.utils.auth_utils import is_authorized
+from src.utils.context import get_service
+from src.utils.date_utils import validate_date_format, format_date
 from src.data.csv.parser import parse_csv
 from src.bot.states.forms import ProjectState
 from src.bot.keyboards import (
@@ -96,9 +97,6 @@ def register_project_handlers(dp: Dispatcher, bot: Bot, project_service, task_se
 
     @dp.message(Command("create_project"))
     async def cmd_create_project(message: types.Message, state: FSMContext):
-        if not is_authorized(message.from_user.id):
-            return
-
         await message.answer("Введите название проекта:")
         await state.set_state(ProjectState.waiting_for_name)
 
@@ -245,7 +243,7 @@ def register_project_handlers(dp: Dispatcher, bot: Bot, project_service, task_se
         await message.answer("Выберите проект для просмотра:", reply_markup=markup)
 
     @dp.callback_query(lambda c: c.data.startswith("view_project_"))
-    async def view_project_callback(callback: types.CallbackQuery):
+    async def view_project_callback(callback: types.CallbackQuery, project_service=None, task_service=None):
         try:
             project_id = int(callback.data.split("_")[2])
         except (ValueError, IndexError):
@@ -253,6 +251,10 @@ def register_project_handlers(dp: Dispatcher, bot: Bot, project_service, task_se
             return
 
         try:
+            # Используем переданные сервисы через внедрение зависимостей
+            # Если у вас недоступен какой-то сервис, используйте get_service
+            _project_service = project_service or get_service("project_service")
+            _task_service = task_service or get_service("task_service")
             # Получаем данные о проекте
             project = project_service.get_project_details(project_id)
             tasks = task_service.get_tasks_by_project(project_id)
@@ -274,7 +276,7 @@ def register_project_handlers(dp: Dispatcher, bot: Bot, project_service, task_se
                             employee = None
                             if subtask.employee_id:
                                 try:
-                                    employee_service = callback.bot.get('employee_service')
+                                    employee_service = callback.bot.dispatcher.get("employee_service")
                                     employee = employee_service.get_employee(subtask.employee_id)
                                 except ValueError:
                                     pass
@@ -285,7 +287,7 @@ def register_project_handlers(dp: Dispatcher, bot: Bot, project_service, task_se
                         employee = None
                         if task.employee_id:
                             try:
-                                employee_service = callback.bot.get('employee_service')
+                                employee_service = callback.bot.dispatcher.get("employee_service")
                                 employee = employee_service.get_employee(task.employee_id)
                             except ValueError:
                                 pass

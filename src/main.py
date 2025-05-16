@@ -7,6 +7,8 @@ from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
 
 from src.config import load_config
+from src.utils.auth_utils import setup_auth_functions, is_authorized, is_admin
+from src.utils.context import init_services
 from src.utils.logging import setup_logging
 from src.data.database.manager import DatabaseManager
 from src.core.services.project_service import ProjectService
@@ -21,6 +23,8 @@ from src.data.templates.default_templates import DEFAULT_TEMPLATES
 from src.core.reports.gantt_chart import GanttChart
 from src.core.reports.workload_chart import WorkloadChart
 from src.bot.handlers import register_all_handlers
+from src.bot.middlewares.auth import AuthMiddleware
+
 
 # Настройка логирования
 logger = logging.getLogger(__name__)
@@ -71,14 +75,16 @@ async def main():
     dp = Dispatcher(storage=storage)
 
     # Добавляем зависимости в контекст бота
-    bot['db_manager'] = db_manager
-    bot['project_service'] = project_service
-    bot['task_service'] = task_service
-    bot['employee_service'] = employee_service
-    bot['schedule_service'] = schedule_service
-    bot['export_service'] = export_service
-    bot['gantt_chart'] = gantt_chart
-    bot['workload_chart'] = workload_chart
+    dp["db_manager"] = db_manager
+    dp["project_service"] = project_service
+    dp["task_service"] = task_service
+    dp["employee_service"] = employee_service
+    dp["schedule_service"] = schedule_service
+    dp["export_service"] = export_service
+    dp["gantt_chart"] = gantt_chart
+    dp["workload_chart"] = workload_chart
+    dp["is_authorized"] = is_authorized
+    dp["is_admin"] = is_admin
 
     # Регистрируем обработчики
     register_all_handlers(
@@ -91,6 +97,8 @@ async def main():
         export_service,
         config
     )
+
+    init_services(dp)
 
     # Запускаем бота
     logger.info("Бот запущен")

@@ -9,7 +9,8 @@ def register_export_handlers(dp: Dispatcher, bot: Bot, export_service, project_s
     """Регистрирует обработчики для экспорта в Jira"""
 
     @dp.callback_query(lambda c: c.data.startswith("export_jira_"))
-    async def export_to_jira(callback: types.CallbackQuery):
+    async def export_to_jira(callback: types.CallbackQuery, export_service=None, project_service=None,
+                             task_service=None, employee_service=None):
         project_id = int(callback.data.split("_")[2])
 
         await callback.message.edit_text("Выполняется экспорт в Jira...")

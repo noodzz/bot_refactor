@@ -5,8 +5,8 @@ from aiogram import Dispatcher, Bot, Router, types, F
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile
 
-from src.utils.helpers import is_authorized
 from src.bot.keyboards import create_back_button
+from src.utils.date_utils import format_date
 
 logger = logging.getLogger(__name__)
 
@@ -17,9 +17,6 @@ def register_employee_handlers(dp: Dispatcher, bot: Bot, employee_service, proje
     @dp.message(Command("employee_workload"))
     async def cmd_employee_workload(message: types.Message):
         """Показывает распределение задач по сотрудникам"""
-        if not is_authorized(message.from_user.id):
-            return
-
         projects = project_service.get_all_projects()
 
         if not projects:
@@ -37,7 +34,8 @@ def register_employee_handlers(dp: Dispatcher, bot: Bot, employee_service, proje
         await message.answer("Выберите проект для просмотра распределения задач по сотрудникам:", reply_markup=markup)
 
     @dp.callback_query(lambda c: c.data.startswith("workload_"))
-    async def show_employee_workload(callback: types.CallbackQuery):
+    async def show_employee_workload(callback: types.CallbackQuery, project_service=None, employee_service=None,
+                                     task_service=None):
         """Показывает распределение задач по сотрудникам для выбранного проекта"""
         try:
             project_id = int(callback.data.split("_")[1])

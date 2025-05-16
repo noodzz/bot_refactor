@@ -5,9 +5,8 @@ import traceback
 import datetime
 from aiogram import Dispatcher, Bot, Router, types, F
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile
-
-from src.utils.helpers import format_date
 from src.bot.keyboards import create_back_button
+from src.utils.date_utils import format_date
 
 logger = logging.getLogger(__name__)
 
@@ -16,7 +15,7 @@ def register_schedule_handlers(dp: Dispatcher, bot: Bot, schedule_service, proje
     """Регистрирует обработчики для календарного планирования"""
 
     @dp.callback_query(lambda c: c.data.startswith("calculate_"))
-    async def calculate_schedule(callback: types.CallbackQuery):
+    async def calculate_schedule(callback: types.CallbackQuery, schedule_service=None, project_service=None, task_service=None):
         project_id = int(callback.data.split("_")[1])
 
         await callback.message.edit_text("Выполняется расчет календарного плана и распределение задач...")

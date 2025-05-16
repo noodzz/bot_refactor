@@ -9,6 +9,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 from src.bot.states.forms import AdminState
+from src.utils.auth_utils import is_admin
 from src.utils.file_utils import create_safe_filename
 from src.bot.keyboards import create_admin_kb, create_user_management_kb, create_back_button
 
@@ -19,10 +20,8 @@ def register_admin_handlers(dp: Dispatcher, bot: Bot, config):
     """Регистрирует обработчики для административных команд"""
 
     @dp.message(Command("admin"))
-    async def cmd_admin(message: types.Message):
+    async def cmd_admin(message: types.Message, is_admin=None):
         """Показывает административное меню"""
-        from src.utils.helpers import is_admin
-
         if not is_admin(message.from_user.id):
             await message.answer("У вас нет прав администратора.")
             return
@@ -31,16 +30,12 @@ def register_admin_handlers(dp: Dispatcher, bot: Bot, config):
         await message.answer("Административное меню:", reply_markup=markup)
 
     @dp.callback_query(F.data == "admin_users")
-    async def admin_users(callback: types.CallbackQuery):
+    async def admin_users(callback: types.CallbackQuery, is_admin=None, db_manager=None):
         """Показывает список пользователей"""
-        from src.utils.helpers import is_admin
-
         if not is_admin(callback.from_user.id):
             await callback.answer("У вас нет прав администратора.")
             return
 
-        # Получаем данные из БД
-        db_manager = callback.bot.get('db_manager')
         users = db_manager.get_all_users()
 
         text = "Список пользователей:\n\n"
@@ -57,19 +52,13 @@ def register_admin_handlers(dp: Dispatcher, bot: Bot, config):
 
     # Обработчик для блокировки/разблокировки пользователя
     @dp.callback_query(lambda c: c.data.startswith("user_block_") or c.data.startswith("user_unblock_"))
-    async def toggle_user_status(callback: types.CallbackQuery):
-        from src.utils.helpers import is_admin
-
+    async def toggle_user_status(callback: types.CallbackQuery, is_admin=None, db_manager=None):
         if not is_admin(callback.from_user.id):
             await callback.answer("У вас нет прав администратора.")
             return
-
         parts = callback.data.split("_")
         action = parts[1]  # "block" или "unblock"
         user_id = int(parts[2])
-
-        # Получаем данные из БД
-        db_manager = callback.bot.get('db_manager')
 
         # Меняем статус пользователя
         is_active = action == "unblock"  # True если разблокировка, False если блокировка
@@ -82,9 +71,7 @@ def register_admin_handlers(dp: Dispatcher, bot: Bot, config):
         await admin_users(callback)
 
     @dp.callback_query(F.data == "add_user")
-    async def add_user_start(callback: types.CallbackQuery, state: FSMContext):
-        from src.utils.helpers import is_admin
-
+    async def add_user_start(callback: types.CallbackQuery, state: FSMContext, is_admin=None):
         if not is_admin(callback.from_user.id):
             await callback.answer("У вас нет прав администратора.")
             return
@@ -95,19 +82,13 @@ def register_admin_handlers(dp: Dispatcher, bot: Bot, config):
         await state.set_state(AdminState.waiting_for_user_id)
 
     @dp.message(AdminState.waiting_for_user_id)
-    async def process_new_user_id(message: types.Message, state: FSMContext):
-        from src.utils.helpers import is_admin
-
+    async def process_new_user_id(message: types.Message, state: FSMContext, is_admin=None, db_manager=None):
         if not is_admin(message.from_user.id):
             await message.answer("У вас нет прав администратора.")
-            await state.clear()
             return
 
         try:
             user_id = int(message.text.strip())
-
-            # Получаем данные из БД
-            db_manager = message.bot.get('db_manager')
 
             # Проверяем, существует ли уже такой пользователь
             existing_user = db_manager.get_user(user_id)
@@ -135,17 +116,13 @@ def register_admin_handlers(dp: Dispatcher, bot: Bot, config):
         await state.clear()
 
     @dp.callback_query(F.data == "admin_stats")
-    async def admin_stats(callback: types.CallbackQuery):
+    async def admin_stats(callback: types.CallbackQuery, is_admin=None, db_manager=None):
         """Показывает статистику использования бота"""
-        from src.utils.helpers import is_admin
-
         if not is_admin(callback.from_user.id):
             await callback.answer("У вас нет прав администратора.")
             return
 
         try:
-            # Получаем данные из БД
-            db_manager = callback.bot.get('db_manager')
 
             # Получаем статистику по проектам
             total_projects = db_manager.execute("SELECT COUNT(*) FROM projects")[0][0]
@@ -227,10 +204,8 @@ def register_admin_handlers(dp: Dispatcher, bot: Bot, config):
             )
 
     @dp.callback_query(F.data == "admin")
-    async def back_to_admin(callback: types.CallbackQuery):
+    async def back_to_admin(callback: types.CallbackQuery, is_admin=None):
         """Возвращает к административному меню"""
-        from src.utils.helpers import is_admin
-
         if not is_admin(callback.from_user.id):
             await callback.answer("У вас нет прав администратора.")
             return
