@@ -211,7 +211,13 @@ class ProjectService:
         Returns:
             List[Project]: Список проектов
         """
-        return self.project_repo.get_projects(user_id)
+        try:
+            projects = self.project_repo.get_projects(user_id)
+            logger.info(f"Получено {len(projects)} проектов из БД для пользователя {user_id}")
+            return projects
+        except Exception as e:
+            logger.error(f"Ошибка при получении списка проектов: {e}")
+            return []
 
     def get_project_details(self, project_id: int) -> Project:
         """

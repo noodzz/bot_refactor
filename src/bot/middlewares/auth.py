@@ -1,7 +1,10 @@
 from typing import Dict, Any, Callable, Awaitable
 from aiogram import BaseMiddleware
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, Update
 from aiogram.dispatcher.flags import get_flag
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class AuthMiddleware(BaseMiddleware):
@@ -22,8 +25,8 @@ class AuthMiddleware(BaseMiddleware):
 
     async def __call__(
             self,
-            handler: Callable[[Message, Dict[str, Any]], Awaitable[Any]],
-            event: Message | CallbackQuery,
+            handler: Callable[[Update, Dict[str, Any]], Awaitable[Any]],
+            event: Update,
             data: Dict[str, Any]
     ) -> Any:
         """
@@ -31,44 +34,61 @@ class AuthMiddleware(BaseMiddleware):
 
         Args:
             handler: Обработчик события
-            event: Входящее событие (сообщение или колбэк)
+            event: Входящее событие (объект Update)
             data: Дополнительные данные
 
         Returns:
             Результат выполнения обработчика
         """
-        # Получаем db_manager из данных диспетчера
-        db_manager = event.bot.dispatcher.get("db_manager")
+        try:
+            # Получаем db_manager из данных
+            db_manager = data.get("db_manager")
 
-        # Пропускаем проверку, если обработчик помечен флагом skip_auth
-        if get_flag(data, "skip_auth"):
+            # Пропускаем проверку, если обработчик помечен флагом skip_auth
+            if get_flag(data, "skip_auth"):
+                return await handler(event, data)
+
+            # Пытаемся получить ID пользователя из события Update
+            user_id = None
+
+            # Для сообщений
+            if event.message and event.message.from_user:
+                user_id = event.message.from_user.id
+            # Для callback-запросов
+            elif event.callback_query and event.callback_query.from_user:
+                user_id = event.callback_query.from_user.id
+
+            logger.debug(f"Проверка авторизации для пользователя: {user_id}")
+
+            # Проверяем, авторизован ли пользователь
+            if not self.is_authorized(user_id, db_manager):
+                logger.info(f"Пользователь {user_id} не авторизован")
+
+                # Для сообщений
+                if event.message:
+                    await event.message.answer(
+                        f"Извините, у вас нет доступа к этому боту.\n"
+                        f"Ваш ID: {user_id}\n"
+                        f"Обратитесь к администратору для получения доступа."
+                    )
+                # Для колбэк-запросов
+                elif event.callback_query:
+                    await event.callback_query.answer("У вас нет доступа к этому боту", show_alert=True)
+
+                # Не продолжаем выполнение обработчика
+                return None
+
+            # Добавляем функции проверки в data для доступа в обработчиках
+            data["is_authorized"] = lambda uid: self.is_authorized(uid, db_manager)
+            data["is_admin"] = lambda uid: self.is_admin(uid, db_manager)
+
+            # Пользователь авторизован, продолжаем выполнение обработчика
             return await handler(event, data)
 
-        # Получаем ID пользователя из события
-        user_id = event.from_user.id if hasattr(event, 'from_user') else None
-
-        # Проверяем, авторизован ли пользователь
-        if not self.is_authorized(user_id, db_manager):
-            # Для сообщений
-            if isinstance(event, Message):
-                await event.answer(
-                    f"Извините, у вас нет доступа к этому боту.\n"
-                    f"Ваш ID: {user_id}\n"
-                    f"Обратитесь к администратору для получения доступа."
-                )
-            # Для колбэк-запросов
-            elif isinstance(event, CallbackQuery):
-                await event.answer("У вас нет доступа к этому боту", show_alert=True)
-
-            # Не продолжаем выполнение обработчика
-            return None
-
-        # Добавляем функции проверки в data для доступа в обработчиках
-        data["is_authorized"] = lambda user_id: self.is_authorized(user_id, db_manager)
-        data["is_admin"] = lambda user_id: self.is_admin(user_id, db_manager)
-
-        # Пользователь авторизован, продолжаем выполнение обработчика
-        return await handler(event, data)
+        except Exception as e:
+            logger.error(f"Ошибка в мидлваре авторизации: {e}")
+            # В случае ошибки, пропускаем событие дальше
+            return await handler(event, data)
 
     def is_authorized(self, user_id: int, db_manager=None) -> bool:
         """
@@ -81,6 +101,9 @@ class AuthMiddleware(BaseMiddleware):
         Returns:
             bool: True, если пользователь авторизован, False в противном случае
         """
+        if user_id is None:
+            return False
+
         if db_manager:
             # Проверяем пользователя в базе данных
             user = db_manager.get_user(user_id)
@@ -104,6 +127,9 @@ class AuthMiddleware(BaseMiddleware):
         Returns:
             bool: True, если пользователь имеет права администратора, иначе False
         """
+        if user_id is None:
+            return False
+
         if db_manager:
             # Проверяем права администратора в базе данных
             user = db_manager.get_user(user_id)

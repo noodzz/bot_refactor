@@ -11,11 +11,26 @@ from src.utils.date_utils import format_date
 logger = logging.getLogger(__name__)
 
 
-def register_schedule_handlers(dp: Dispatcher, bot: Bot, schedule_service, project_service, task_service):
+def register_schedule_handlers(
+        dp: Dispatcher,
+        bot: Bot,
+        schedule_service,
+        project_service,
+        task_service,
+        employee_service,
+        gantt_chart
+):
     """Регистрирует обработчики для календарного планирования"""
 
     @dp.callback_query(lambda c: c.data.startswith("calculate_"))
-    async def calculate_schedule(callback: types.CallbackQuery, schedule_service=None, project_service=None, task_service=None):
+    async def calculate_schedule(
+            callback: types.CallbackQuery,
+            schedule_service=schedule_service,
+            project_service=project_service,
+            task_service=task_service,
+            employee_service=employee_service,
+            gantt_chart=gantt_chart
+    ):
         project_id = int(callback.data.split("_")[1])
 
         await callback.message.edit_text("Выполняется расчет календарного плана и распределение задач...")
@@ -91,7 +106,6 @@ def register_schedule_handlers(dp: Dispatcher, bot: Bot, schedule_service, proje
                     # Добавляем информацию о сотруднике, если назначен
                     if task.employee_id:
                         try:
-                            employee_service = callback.bot.get('employee_service')
                             employee = employee_service.get_employee(task.employee_id)
                             text += f"  Исполнитель: {employee.name} ({employee.position})\n"
                         except:
@@ -114,7 +128,6 @@ def register_schedule_handlers(dp: Dispatcher, bot: Bot, schedule_service, proje
                     text += "не найдены\n\n"
 
             # Добавляем информацию о распределении задач по сотрудникам
-            employee_service = callback.bot.get('employee_service')
             text += f"👥 РАСПРЕДЕЛЕНИЕ ЗАДАЧ\n"
 
             employee_workload = employee_service.get_employee_workload(project_id)
@@ -162,7 +175,6 @@ def register_schedule_handlers(dp: Dispatcher, bot: Bot, schedule_service, proje
             text += f"Система автоматизированного календарного планирования"
 
             # Генерируем диаграмму Ганта
-            gantt_chart = callback.bot.get('gantt_chart')
             gantt_image = gantt_chart.generate(project.to_dict(), [task.to_dict() for task in tasks],
                                                result['task_dates'], result['critical_path'])
 

@@ -13,6 +13,16 @@ def load_config() -> Dict[str, Any]:
     # Загружаем .env файл, если он существует
     load_dotenv()
 
+    # Получаем абсолютный путь к папке проекта
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    # Путь к файлу базы данных (с абсолютным путем)
+    db_name = os.getenv('DB_NAME', 'project_bot.db')
+    # Полный путь к базе данных в корневой директории
+    db_path = os.path.join(base_dir, db_name)
+
+    print(f"База данных будет использоваться по пути: {db_path}")
+
     return {
         'BOT_TOKEN': os.getenv('BOT_TOKEN'),
         'DB_NAME': os.getenv('DB_NAME', 'project_bot.db'),

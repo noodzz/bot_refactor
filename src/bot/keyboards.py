@@ -46,10 +46,10 @@ def create_projects_list_kb(projects: List[Dict[str, Any]]) -> InlineKeyboardMar
     """
     buttons = []
     for project in projects:
-        start_date = project['start_date'][:10] if 'start_date' in project else "Нет даты"
+        start_date = project.start_date[:10] if project.start_date else "Нет даты"
         buttons.append([InlineKeyboardButton(
-            text=f"{project['name']} (начало: {start_date})",
-            callback_data=f"view_project_{project['id']}"
+            text=f"{project.name} (начало: {start_date})",
+            callback_data=f"view_project_{project.id}"
         )])
 
     # Добавляем кнопку для создания нового проекта

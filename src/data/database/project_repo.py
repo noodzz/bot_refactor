@@ -1,3 +1,4 @@
+import logging
 from typing import List, Dict, Any, Optional
 import sqlite3
 from src.core.models.project import Project
@@ -27,17 +28,33 @@ class ProjectRepository:
         Returns:
             int: ID созданного проекта
         """
-        self.db.connect()
-
-        query = "INSERT INTO projects (name, start_date, user_id) VALUES (?, ?, ?)"
-        params = (name, start_date, user_id)
-
+        logger = logging.getLogger(__name__)
         try:
-            self.db.cursor.execute(query, params)
-            self.db.connection.commit()
-            return self.db.cursor.lastrowid
-        finally:
-            self.db.close()
+            # Выполняем вставку и получение ID в одной транзакции
+            queries = [
+                (
+                    "INSERT INTO projects (name, start_date, user_id) VALUES (?, ?, ?)",
+                    (name, start_date, user_id)
+                ),
+                (
+                    "SELECT last_insert_rowid()",
+                    None
+                )
+            ]
+
+            results = self.db.execute_transaction(queries)
+
+            # Второй результат - это результат SELECT last_insert_rowid()
+            if results and len(results) > 1 and results[1] and results[1][0]:
+                project_id = results[1][0][0]
+                logger.info(f"Создан проект '{name}' с ID {project_id}")
+                return project_id
+
+            logger.error(f"Не удалось получить ID созданного проекта '{name}'")
+            return 0
+        except Exception as e:
+            logger.error(f"Ошибка при создании проекта '{name}': {str(e)}")
+            raise ValueError(f"Не удалось создать проект: {str(e)}")
 
     def get_project(self, project_id: int) -> Optional[Project]:
         """
@@ -64,15 +81,21 @@ class ProjectRepository:
         Returns:
             List[Project]: Список проектов
         """
-        if user_id is not None:
-            result = self.db.execute(
-                "SELECT * FROM projects WHERE user_id = ? ORDER BY created_at DESC",
-                (user_id,)
-            )
-        else:
-            result = self.db.execute("SELECT * FROM projects ORDER BY created_at DESC")
+        logger = logging.getLogger(__name__)
+        try:
+            if user_id is not None:
+                query = "SELECT * FROM projects WHERE user_id = ? ORDER BY created_at DESC"
+                result = self.db.execute(query, (user_id,))
+            else:
+                query = "SELECT * FROM projects ORDER BY created_at DESC"
+                result = self.db.execute(query)
 
-        return [Project.from_dict(dict(row)) for row in result]
+            projects = [Project.from_dict(dict(row)) for row in result]
+            logger.info(f"Получено {len(projects)} проектов, запрос: {query}")
+            return projects
+        except Exception as e:
+            logger.error(f"Ошибка при получении списка проектов: {e}")
+            return []
 
     def update_project(self, project: Project) -> bool:
         """

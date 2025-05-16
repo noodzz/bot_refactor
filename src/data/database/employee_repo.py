@@ -1,3 +1,4 @@
+import logging
 from typing import List, Optional, Dict, Any
 import json
 from src.core.models.employee import Employee
@@ -25,22 +26,23 @@ class EmployeeRepository:
         Returns:
             int: ID созданного сотрудника
         """
-        self.db.connect()
-
         # Сериализуем days_off, если это список
         days_off = employee.days_off
         if not isinstance(days_off, str):
             days_off = json.dumps(days_off)
-
+        logger = logging.getLogger(__name__)
         query = "INSERT INTO employees (id, name, position, days_off) VALUES (?, ?, ?, ?)"
         params = (employee.id, employee.name, employee.position, days_off)
-
         try:
-            self.db.cursor.execute(query, params)
-            self.db.connection.commit()
-            return self.db.cursor.lastrowid if employee.id is None else employee.id
-        finally:
-            self.db.close()
+            self.db.execute(query, params)
+            # Получаем ID созданного сотрудника
+            if employee.id is None:
+                result = self.db.execute("SELECT last_insert_rowid()")
+                return result[0][0] if result else 0
+            return employee.id
+        except Exception as e:
+            logger.error(f"Ошибка при создании сотрудника: {str(e)}")
+            raise ValueError(f"Не удалось создать сотрудника: {str(e)}")
 
     def get_employee(self, employee_id: int) -> Optional[Employee]:
         """

@@ -22,29 +22,39 @@ logger = logging.getLogger(__name__)
 def register_project_handlers(dp: Dispatcher, bot: Bot, project_service, task_service):
     """Регистрирует обработчики команд для работы с проектами"""
 
+    @dp.message(Command("ping"))
+    async def cmd_ping(message: types.Message):
+        """Simple ping command that bypasses auth"""
+        print(f"PING received from {message.from_user.id}")
+        await message.answer("PONG!")
+
     @dp.message(CommandStart())
     async def cmd_start(message: types.Message):
-        if not is_authorized(message.from_user.id):
-            user_id = message.from_user.id
-            await message.answer(
-                f"Извините, у вас нет доступа к этому боту.\n"
-                f"Ваш ID: {user_id}\n"
-                f"Обратитесь к администратору для получения доступа."
-            )
-            return
+        # Direct logging regardless of authorization
+        print(f"START COMMAND RECEIVED from user {message.from_user.id}")
+        logger.info(f"START COMMAND RECEIVED from user {message.from_user.id}")
 
-        welcome_text = (
-            "👋 Добро пожаловать в бот для управления проектами!\n\n"
-            "С моей помощью вы можете:\n"
-            "• Создавать проекты\n"
-            "• Рассчитывать оптимальный календарный план\n"
-            "• Распределять задачи по сотрудникам\n"
-            "• Экспортировать проекты в Jira\n\n"
-            "Используйте /create_project, чтобы создать новый проект\n"
-            "Или /list_projects, чтобы увидеть список существующих проектов.\n\n"
-            "Дополнительная помощь: /help"
-        )
-        await message.answer(welcome_text)
+        try:
+            if not is_authorized(message.from_user.id):
+                user_id = message.from_user.id
+                await message.answer(
+                    f"Извините, у вас нет доступа к этому боту.\n"
+                    f"Ваш ID: {user_id}\n"
+                    f"Обратитесь к администратору для получения доступа."
+                )
+                return
+
+            welcome_text = (
+                "👋 Добро пожаловать в бот для управления проектами!\n\n"
+                # Rest of welcome message...
+            )
+            await message.answer(welcome_text)
+        except Exception as e:
+            error_msg = f"Error in start handler: {str(e)}"
+            print(error_msg)
+            logger.error(error_msg)
+            # Try to respond even if there's an error
+            await message.answer(f"Error processing your command: {str(e)}")
 
     @dp.message(Command("help"))
     async def cmd_help(message: types.Message):

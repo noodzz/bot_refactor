@@ -76,12 +76,14 @@ class Task:
         Returns:
             dict: Словарь с данными задачи
         """
-        import json
-
-        # Сериализуем предшественников, если они не строка
+        # Сериализуем предшественников, если это не строка
         predecessors = self.predecessors
-        if not isinstance(predecessors, str) and predecessors:
-            predecessors = json.dumps(predecessors)
+        if predecessors is not None and not isinstance(predecessors, str):
+            import json
+            try:
+                predecessors = json.dumps(predecessors)
+            except:
+                predecessors = "[]"  # Если сериализация не удалась, используем пустой список
 
         return {
             'id': self.id,
@@ -89,12 +91,12 @@ class Task:
             'parent_id': self.parent_id,
             'name': self.name,
             'duration': self.duration,
+            'working_duration': self.working_duration,
             'is_group': self.is_group,
             'parallel': self.parallel,
             'start_date': self.start_date,
             'end_date': self.end_date,
             'employee_id': self.employee_id,
             'position': self.position,
-            'predecessors': predecessors,
-            'working_duration': self.working_duration
+            'predecessors': predecessors
         }

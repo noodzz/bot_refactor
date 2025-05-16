@@ -1,3 +1,4 @@
+import logging
 from typing import List, Dict, Any, Optional, Union
 import json
 from src.core.models.task import Task
@@ -25,33 +26,45 @@ class TaskRepository:
         Returns:
             int: ID созданной задачи
         """
-        self.db.connect()
-
-        # Сериализуем предшественников, если это список
-        predecessors = task.predecessors
-        if not isinstance(predecessors, str) and predecessors:
-            predecessors = json.dumps(predecessors)
-
-        # Если working_duration не указано, используем duration
-        working_duration = task.working_duration or task.duration
-
-        query = """INSERT INTO tasks 
-                   (project_id, parent_id, name, duration, working_duration, 
-                   is_group, parallel, position, predecessors) 
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"""
-
-        params = (
-            task.project_id, task.parent_id, task.name, task.duration,
-            working_duration, task.is_group, task.parallel, task.position,
-            predecessors
-        )
-
         try:
-            self.db.cursor.execute(query, params)
-            self.db.connection.commit()
-            return self.db.cursor.lastrowid
-        finally:
-            self.db.close()
+            # Сериализуем предшественников в строку JSON
+            predecessors = task.predecessors
+            if predecessors is not None:
+                if isinstance(predecessors, list):
+                    import json
+                    predecessors = json.dumps(predecessors)
+                elif not isinstance(predecessors, str):
+                    predecessors = str(predecessors)
+            else:
+                predecessors = "[]"  # Пустой список в формате JSON
+            logger = logging.getLogger(__name__)
+            logger.debug(f"Предшественники после обработки: {predecessors}, тип: {type(predecessors)}")
+
+            # Если working_duration не указано, используем duration
+            working_duration = task.working_duration or task.duration
+
+            query = """INSERT INTO tasks 
+                       (project_id, parent_id, name, duration, working_duration, 
+                       is_group, parallel, position, predecessors) 
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+
+            params = (
+                task.project_id, task.parent_id, task.name, task.duration,
+                working_duration, task.is_group, task.parallel, task.position,
+                predecessors
+            )
+
+            logger.debug(f"Создание задачи: {task.name}, параметры: {params}")
+
+            self.db.execute(query, params)
+            # Получаем ID созданной задачи
+            result = self.db.execute("SELECT last_insert_rowid()")
+            task_id = result[0][0] if result else 0
+            logger.debug(f"Создана задача с ID: {task_id}")
+            return task_id
+        except Exception as e:
+            logger.error(f"Ошибка при создании задачи: {str(e)}")
+            raise ValueError(f"Не удалось создать задачу: {str(e)}")
 
     def get_task(self, task_id: int) -> Optional[Task]:
         """
